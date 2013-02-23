@@ -383,13 +383,14 @@ const AccessorDescriptor Accessors::ScriptEvalFromScript = {
 
 
 MaybeObject* Accessors::ScriptGetEvalFromScriptPosition(Object* object, void*) {
-  HandleScope scope;
-  Handle<Script> script(Script::cast(JSValue::cast(object)->value()));
+  Script* raw_script = Script::cast(JSValue::cast(object)->value());
+  HandleScope scope(raw_script->GetIsolate());
+  Handle<Script> script(raw_script);
 
   // If this is not a script compiled through eval there is no eval position.
   int compilation_type = Smi::cast(script->compilation_type())->value();
   if (compilation_type != Script::COMPILATION_TYPE_EVAL) {
-    return HEAP->undefined_value();
+    return script->GetHeap()->undefined_value();
   }
 
   // Get the function from where eval was called and find the source position
@@ -465,24 +466,46 @@ MaybeObject* Accessors::FunctionGetPrototype(Object* object, void*) {
 
 
 MaybeObject* Accessors::FunctionSetPrototype(JSObject* object,
-                                             Object* value,
+                                             Object* value_raw,
                                              void*) {
-  Heap* heap = object->GetHeap();
-  JSFunction* function = FindInstanceOf<JSFunction>(object);
-  if (function == NULL) return heap->undefined_value();
-  if (!function->should_have_prototype()) {
+  Isolate* isolate = object->GetIsolate();
+  Heap* heap = isolate->heap();
+  JSFunction* function_raw = FindInstanceOf<JSFunction>(object);
+  if (function_raw == NULL) return heap->undefined_value();
+  if (!function_raw->should_have_prototype()) {
     // Since we hit this accessor, object will have no prototype property.
     return object->SetLocalPropertyIgnoreAttributes(heap->prototype_symbol(),
-                                                    value,
+                                                    value_raw,
                                                     NONE);
   }
 
-  Object* prototype;
-  { MaybeObject* maybe_prototype = function->SetPrototype(value);
-    if (!maybe_prototype->ToObject(&prototype)) return maybe_prototype;
+  HandleScope scope(isolate);
+  Handle<JSFunction> function(function_raw, isolate);
+  Handle<Object> value(value_raw, isolate);
+
+  Handle<Object> old_value;
+  bool is_observed =
+      FLAG_harmony_observation &&
+      *function == object &&
+      function->map()->is_observed();
+  if (is_observed) {
+    if (function->has_prototype())
+      old_value = handle(function->prototype(), isolate);
+    else
+      old_value = isolate->factory()->NewFunctionPrototype(function);
   }
-  ASSERT(function->prototype() == value);
-  return function;
+
+  Handle<Object> result;
+  MaybeObject* maybe_result = function->SetPrototype(*value);
+  if (!maybe_result->ToHandle(&result, isolate)) return maybe_result;
+  ASSERT(function->prototype() == *value);
+
+  if (is_observed && !old_value->SameValue(*value)) {
+    JSObject::EnqueueChangeRecord(
+        function, "updated", isolate->factory()->prototype_symbol(), old_value);
+  }
+
+  return *function;
 }
 
 
@@ -507,7 +530,7 @@ MaybeObject* Accessors::FunctionGetLength(Object* object, void*) {
   }
   // If the function isn't compiled yet, the length is not computed correctly
   // yet. Compile it now and return the right length.
-  HandleScope scope;
+  HandleScope scope(function->GetIsolate());
   Handle<JSFunction> handle(function);
   if (JSFunction::CompileLazy(handle, KEEP_EXCEPTION)) {
     return Smi::FromInt(handle->shared()->length());
@@ -649,19 +672,6 @@ const AccessorDescriptor Accessors::FunctionArguments = {
 //
 
 
-static MaybeObject* CheckNonStrictCallerOrThrow(
-    Isolate* isolate,
-    JSFunction* caller) {
-  DisableAssertNoAllocation enable_allocation;
-  if (!caller->shared()->is_classic_mode()) {
-    return isolate->Throw(
-        *isolate->factory()->NewTypeError("strict_caller",
-                                          HandleVector<Object>(NULL, 0)));
-  }
-  return caller;
-}
-
-
 class FrameFunctionIterator {
  public:
   FrameFunctionIterator(Isolate* isolate, const AssertNoAllocation& promise)
@@ -748,7 +758,14 @@ MaybeObject* Accessors::FunctionGetCaller(Object* object, void*) {
   if (caller->shared()->bound()) {
     return isolate->heap()->null_value();
   }
-  return CheckNonStrictCallerOrThrow(isolate, caller);
+  // Censor if the caller is not a classic mode function.
+  // Change from ES5, which used to throw, see:
+  // https://bugs.ecmascript.org/show_bug.cgi?id=310
+  if (!caller->shared()->is_classic_mode()) {
+    return isolate->heap()->null_value();
+  }
+
+  return caller;
 }
 
 
@@ -764,7 +781,7 @@ const AccessorDescriptor Accessors::FunctionCaller = {
 //
 
 
-MaybeObject* Accessors::ObjectGetPrototype(Object* receiver, void*) {
+static inline Object* GetPrototypeSkipHiddenPrototypes(Object* receiver) {
   Object* current = receiver->GetPrototype();
   while (current->IsJSObject() &&
          JSObject::cast(current)->map()->is_hidden_prototype()) {
@@ -774,12 +791,36 @@ MaybeObject* Accessors::ObjectGetPrototype(Object* receiver, void*) {
 }
 
 
-MaybeObject* Accessors::ObjectSetPrototype(JSObject* receiver,
-                                           Object* value,
+MaybeObject* Accessors::ObjectGetPrototype(Object* receiver, void*) {
+  return GetPrototypeSkipHiddenPrototypes(receiver);
+}
+
+
+MaybeObject* Accessors::ObjectSetPrototype(JSObject* receiver_raw,
+                                           Object* value_raw,
                                            void*) {
-  const bool skip_hidden_prototypes = true;
+  const bool kSkipHiddenPrototypes = true;
   // To be consistent with other Set functions, return the value.
-  return receiver->SetPrototype(value, skip_hidden_prototypes);
+  if (!(FLAG_harmony_observation && receiver_raw->map()->is_observed()))
+    return receiver_raw->SetPrototype(value_raw, kSkipHiddenPrototypes);
+
+  Isolate* isolate = receiver_raw->GetIsolate();
+  HandleScope scope(isolate);
+  Handle<JSObject> receiver(receiver_raw);
+  Handle<Object> value(value_raw);
+  Handle<Object> old_value(GetPrototypeSkipHiddenPrototypes(*receiver));
+
+  MaybeObject* result = receiver->SetPrototype(*value, kSkipHiddenPrototypes);
+  Handle<Object> hresult;
+  if (!result->ToHandle(&hresult, isolate)) return result;
+
+  Handle<Object> new_value(GetPrototypeSkipHiddenPrototypes(*receiver));
+  if (!new_value->SameValue(*old_value)) {
+    JSObject::EnqueueChangeRecord(receiver, "prototype",
+                                  isolate->factory()->Proto_symbol(),
+                                  old_value);
+  }
+  return *hresult;
 }
 
 
@@ -840,7 +881,7 @@ Handle<AccessorInfo> Accessors::MakeModuleExport(
     int index,
     PropertyAttributes attributes) {
   Factory* factory = name->GetIsolate()->factory();
-  Handle<AccessorInfo> info = factory->NewAccessorInfo();
+  Handle<ExecutableAccessorInfo> info = factory->NewExecutableAccessorInfo();
   info->set_property_attributes(attributes);
   info->set_all_can_read(true);
   info->set_all_can_write(true);

@@ -132,6 +132,8 @@ TEST(ExternalReferenceEncoder) {
   CHECK_EQ(make_code(UNCLASSIFIED, 3),
            encoder.Encode(
                ExternalReference::roots_array_start(isolate).address()));
+  CHECK_EQ(make_code(UNCLASSIFIED, 52),
+           encoder.Encode(ExternalReference::cpu_features().address()));
 }
 
 
@@ -249,7 +251,7 @@ static void Serialize() {
   // will clear the pending fixups array, which would otherwise contain GC roots
   // that would confuse the serialization/deserialization process.
   v8::Persistent<v8::Context> env = v8::Context::New();
-  env.Dispose();
+  env.Dispose(env->GetIsolate());
   WriteToFile(FLAG_testing_serialization_file);
 }
 
@@ -291,7 +293,8 @@ static void SanityCheck() {
   CHECK(Isolate::Current()->global_object()->IsJSObject());
   CHECK(Isolate::Current()->native_context()->IsContext());
   CHECK(HEAP->symbol_table()->IsSymbolTable());
-  CHECK(!FACTORY->LookupAsciiSymbol("Empty")->IsFailure());
+  CHECK(!FACTORY->LookupOneByteSymbol(
+      STATIC_ASCII_VECTOR("Empty"))->IsFailure());
 }
 
 
@@ -361,18 +364,20 @@ TEST(PartialSerialization) {
   if (!Snapshot::HaveASnapshotToStartFrom()) {
     Serializer::Enable();
     v8::V8::Initialize();
+    Isolate* isolate = Isolate::Current();
+    Heap* heap = isolate->heap();
 
     v8::Persistent<v8::Context> env = v8::Context::New();
     ASSERT(!env.IsEmpty());
     env->Enter();
     // Make sure all builtin scripts are cached.
-    { HandleScope scope;
+    { HandleScope scope(isolate);
       for (int i = 0; i < Natives::GetBuiltinsCount(); i++) {
-        Isolate::Current()->bootstrapper()->NativesSourceLookup(i);
+        isolate->bootstrapper()->NativesSourceLookup(i);
       }
     }
-    HEAP->CollectAllGarbage(Heap::kNoGCFlags);
-    HEAP->CollectAllGarbage(Heap::kNoGCFlags);
+    heap->CollectAllGarbage(Heap::kNoGCFlags);
+    heap->CollectAllGarbage(Heap::kNoGCFlags);
 
     Object* raw_foo;
     {
@@ -387,7 +392,7 @@ TEST(PartialSerialization) {
     OS::SNPrintF(startup_name, "%s.startup", FLAG_testing_serialization_file);
 
     env->Exit();
-    env.Dispose();
+    env.Dispose(env->GetIsolate());
 
     FileByteSink startup_sink(startup_name.start());
     StartupSerializer startup_serializer(&startup_sink);
@@ -493,19 +498,21 @@ TEST(ContextSerialization) {
   if (!Snapshot::HaveASnapshotToStartFrom()) {
     Serializer::Enable();
     v8::V8::Initialize();
+    Isolate* isolate = Isolate::Current();
+    Heap* heap = isolate->heap();
 
     v8::Persistent<v8::Context> env = v8::Context::New();
     ASSERT(!env.IsEmpty());
     env->Enter();
     // Make sure all builtin scripts are cached.
-    { HandleScope scope;
+    { HandleScope scope(isolate);
       for (int i = 0; i < Natives::GetBuiltinsCount(); i++) {
-        Isolate::Current()->bootstrapper()->NativesSourceLookup(i);
+        isolate->bootstrapper()->NativesSourceLookup(i);
       }
     }
     // If we don't do this then we end up with a stray root pointing at the
     // context even after we have disposed of env.
-    HEAP->CollectAllGarbage(Heap::kNoGCFlags);
+    heap->CollectAllGarbage(Heap::kNoGCFlags);
 
     int file_name_length = StrLength(FLAG_testing_serialization_file) + 10;
     Vector<char> startup_name = Vector<char>::New(file_name_length + 1);
@@ -515,7 +522,7 @@ TEST(ContextSerialization) {
 
     Object* raw_context = *(v8::Utils::OpenHandle(*env));
 
-    env.Dispose();
+    env.Dispose(env->GetIsolate());
 
     FileByteSink startup_sink(startup_name.start());
     StartupSerializer startup_serializer(&startup_sink);

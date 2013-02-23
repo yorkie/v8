@@ -398,7 +398,7 @@ THREADED_TEST(Gc) {
 
 static v8::Handle<Value> StackCheck(Local<String> name,
                                     const AccessorInfo& info) {
-  i::StackFrameIterator iter;
+  i::StackFrameIterator iter(reinterpret_cast<i::Isolate*>(info.GetIsolate()));
   for (int i = 0; !iter.done(); i++) {
     i::StackFrame* frame = iter.frame();
     CHECK(i != 0 || (frame->type() == i::StackFrame::EXIT));
@@ -452,4 +452,30 @@ THREADED_TEST(HandleScopeSegment) {
       "  result = obj.xxx;"
       "result;"))->Run();
   CHECK_EQ(100, result->Int32Value());
+}
+
+
+v8::Handle<v8::Array> JSONStringifyEnumerator(const AccessorInfo& info) {
+  v8::Handle<v8::Array> array = v8::Array::New(1);
+  array->Set(0, v8_str("regress"));
+  return array;
+}
+
+
+v8::Handle<v8::Value> JSONStringifyGetter(Local<String> name,
+                                          const AccessorInfo& info) {
+  return v8_str("crbug-161028");
+}
+
+
+THREADED_TEST(JSONStringifyNamedInterceptorObject) {
+  v8::HandleScope scope;
+  LocalContext env;
+
+  v8::Handle<v8::ObjectTemplate> obj = ObjectTemplate::New();
+  obj->SetNamedPropertyHandler(
+      JSONStringifyGetter, NULL, NULL, NULL, JSONStringifyEnumerator);
+  env->Global()->Set(v8_str("obj"), obj->NewInstance());
+  v8::Handle<v8::String> expected = v8_str("{\"regress\":\"crbug-161028\"}");
+  CHECK(CompileRun("JSON.stringify(obj)")->Equals(expected));
 }

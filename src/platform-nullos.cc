@@ -266,6 +266,12 @@ void OS::Sleep(int milliseconds) {
 }
 
 
+int OS::NumberOfCores() {
+  UNIMPLEMENTED();
+  return 0;
+}
+
+
 void OS::Abort() {
   // Minimalistic implementation for bootstrapping.
   abort();
@@ -274,6 +280,11 @@ void OS::Abort() {
 
 void OS::DebugBreak() {
   UNIMPLEMENTED();
+}
+
+
+void OS::DumpBacktrace() {
+  // Currently unsupported.
 }
 
 
@@ -511,14 +522,6 @@ void ProfileSampler::Start() {
 
 void ProfileSampler::Stop() {
   UNIMPLEMENTED();
-}
-
-
-void Sampler::StartSampling() {
-}
-
-
-void Sampler::StopSampling() {
 }
 
 
