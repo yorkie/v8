@@ -119,12 +119,16 @@ class Mutex;
 double ceiling(double x);
 double modulo(double x, double y);
 
-// Custom implementation of sin, cos, tan and log.
+// Custom implementation of math functions.
 double fast_sin(double input);
 double fast_cos(double input);
 double fast_tan(double input);
 double fast_log(double input);
+double fast_exp(double input);
 double fast_sqrt(double input);
+// The custom exp implementation needs 16KB of lookup data; initialize it
+// on demand.
+void lazily_initialize_fast_exp();
 
 // Forward declarations.
 class Socket;
@@ -235,11 +239,16 @@ class OS {
   // Sleep for a number of milliseconds.
   static void Sleep(const int milliseconds);
 
+  static int NumberOfCores();
+
   // Abort the current process.
   static void Abort();
 
   // Debug break.
   static void DebugBreak();
+
+  // Dump C++ current stack trace (only functional on Linux).
+  static void DumpBacktrace();
 
   // Walk the stack.
   static const int kStackWalkError = -1;
@@ -749,9 +758,6 @@ class Sampler {
     IncSamplesTaken();
   }
 
-  // Performs platform-specific stack sampling.
-  void DoSample();
-
   // This method is called for each sampling period with the current
   // program counter.
   virtual void Tick(TickSample* sample) = 0;
@@ -760,28 +766,10 @@ class Sampler {
   void Start();
   void Stop();
 
-  // Whether the sampling thread should use this Sampler for CPU profiling?
-  bool IsProfiling() const {
-    return NoBarrier_Load(&profiling_) > 0 &&
-        !NoBarrier_Load(&has_processing_thread_);
-  }
-  // Perform platform-specific initialization before DoSample() may be invoked.
-  void StartSampling();
-  // Perform platform-specific cleanup after samping.
-  void StopSampling();
-  void IncreaseProfilingDepth() {
-    if (NoBarrier_AtomicIncrement(&profiling_, 1) == 1) {
-      StartSampling();
-    }
-  }
-  void DecreaseProfilingDepth() {
-    if (!NoBarrier_AtomicIncrement(&profiling_, -1)) {
-      StopSampling();
-    }
-  }
-  void SetHasProcessingThread(bool value) {
-    NoBarrier_Store(&has_processing_thread_, value);
-  }
+  // Is the sampler used for profiling?
+  bool IsProfiling() const { return NoBarrier_Load(&profiling_) > 0; }
+  void IncreaseProfilingDepth() { NoBarrier_AtomicIncrement(&profiling_, 1); }
+  void DecreaseProfilingDepth() { NoBarrier_AtomicIncrement(&profiling_, -1); }
 
   // Whether the sampler is running (that is, consumes resources).
   bool IsActive() const { return NoBarrier_Load(&active_); }
@@ -808,7 +796,6 @@ class Sampler {
   const int interval_;
   Atomic32 profiling_;
   Atomic32 active_;
-  Atomic32 has_processing_thread_;
   PlatformData* data_;  // Platform specific data.
   int samples_taken_;  // Counts stack samples taken.
   DISALLOW_IMPLICIT_CONSTRUCTORS(Sampler);

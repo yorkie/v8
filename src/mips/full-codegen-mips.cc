@@ -147,7 +147,7 @@ void FullCodeGenerator::Generate() {
 
 #ifdef DEBUG
   if (strlen(FLAG_stop_at) > 0 &&
-      info->function()->name()->IsEqualTo(CStrVector(FLAG_stop_at))) {
+      info->function()->name()->IsUtf8EqualTo(CStrVector(FLAG_stop_at))) {
     __ stop("stop-at");
   }
 #endif
@@ -158,14 +158,11 @@ void FullCodeGenerator::Generate() {
   // function calls.
   if (!info->is_classic_mode() || info->is_native()) {
     Label ok;
-    Label begin;
-    __ bind(&begin);
     __ Branch(&ok, eq, t1, Operand(zero_reg));
     int receiver_offset = info->scope()->num_parameters() * kPointerSize;
     __ LoadRoot(a2, Heap::kUndefinedValueRootIndex);
     __ sw(a2, MemOperand(sp, receiver_offset));
     __ bind(&ok);
-    ASSERT_EQ(kSizeOfFullCodegenStrictModePrologue, ok.pos() - begin.pos());
   }
 
   // Open a frame scope to indicate that there is a frame on the stack.  The
@@ -175,6 +172,7 @@ void FullCodeGenerator::Generate() {
 
   int locals_count = info->scope()->num_stack_slots();
 
+  info->set_prologue_offset(masm_->pc_offset());
   // The following three instructions must remain together and unmodified for
   // code aging to work properly.
   __ Push(ra, fp, cp, a1);
@@ -348,45 +346,34 @@ void FullCodeGenerator::EmitProfilingCounterReset() {
 }
 
 
-void FullCodeGenerator::EmitStackCheck(IterationStatement* stmt,
-                                       Label* back_edge_target) {
+void FullCodeGenerator::EmitBackEdgeBookkeeping(IterationStatement* stmt,
+                                                Label* back_edge_target) {
   // The generated code is used in Deoptimizer::PatchStackCheckCodeAt so we need
   // to make sure it is constant. Branch may emit a skip-or-jump sequence
   // instead of the normal Branch. It seems that the "skip" part of that
   // sequence is about as long as this Branch would be so it is safe to ignore
   // that.
   Assembler::BlockTrampolinePoolScope block_trampoline_pool(masm_);
-  Comment cmnt(masm_, "[ Stack check");
+  Comment cmnt(masm_, "[ Back edge bookkeeping");
   Label ok;
-  if (FLAG_count_based_interrupts) {
-    int weight = 1;
-    if (FLAG_weighted_back_edges) {
-      ASSERT(back_edge_target->is_bound());
-      int distance = masm_->SizeOfCodeGeneratedSince(back_edge_target);
-      weight = Min(kMaxBackEdgeWeight,
-                   Max(1, distance / kBackEdgeDistanceUnit));
-    }
-    EmitProfilingCounterDecrement(weight);
-    __ slt(at, a3, zero_reg);
-    __ beq(at, zero_reg, &ok);
-    // CallStub will emit a li t9 first, so it is safe to use the delay slot.
-    InterruptStub stub;
-    __ CallStub(&stub);
-  } else {
-    __ LoadRoot(t0, Heap::kStackLimitRootIndex);
-    __ sltu(at, sp, t0);
-    __ beq(at, zero_reg, &ok);
-    // CallStub will emit a li t9 first, so it is safe to use the delay slot.
-    StackCheckStub stub;
-    __ CallStub(&stub);
+  int weight = 1;
+  if (FLAG_weighted_back_edges) {
+    ASSERT(back_edge_target->is_bound());
+    int distance = masm_->SizeOfCodeGeneratedSince(back_edge_target);
+    weight = Min(kMaxBackEdgeWeight,
+                 Max(1, distance / kBackEdgeDistanceUnit));
   }
+  EmitProfilingCounterDecrement(weight);
+  __ slt(at, a3, zero_reg);
+  __ beq(at, zero_reg, &ok);
+  // CallStub will emit a li t9 first, so it is safe to use the delay slot.
+  InterruptStub stub;
+  __ CallStub(&stub);
   // Record a mapping of this PC offset to the OSR id.  This is used to find
   // the AST id from the unoptimized code in order to use it as a key into
   // the deoptimization input data found in the optimized code.
-  RecordStackCheck(stmt->OsrEntryId());
-  if (FLAG_count_based_interrupts) {
-    EmitProfilingCounterReset();
-  }
+  RecordBackEdge(stmt->OsrEntryId());
+  EmitProfilingCounterReset();
 
   __ bind(&ok);
   PrepareForBailoutForId(stmt->EntryId(), NO_REGISTERS);
@@ -688,7 +675,7 @@ void FullCodeGenerator::DoTest(Expression* condition,
                                Label* fall_through) {
   if (CpuFeatures::IsSupported(FPU)) {
     ToBooleanStub stub(result_register());
-    __ CallStub(&stub);
+    __ CallStub(&stub, condition->test_id());
     __ mov(at, zero_reg);
   } else {
     // Call the runtime to find the boolean value of the source and then
@@ -932,34 +919,33 @@ void FullCodeGenerator::VisitFunctionDeclaration(
 
 
 void FullCodeGenerator::VisitModuleDeclaration(ModuleDeclaration* declaration) {
-  VariableProxy* proxy = declaration->proxy();
-  Variable* variable = proxy->var();
-  Handle<JSModule> instance = declaration->module()->interface()->Instance();
-  ASSERT(!instance.is_null());
+  Variable* variable = declaration->proxy()->var();
+  ASSERT(variable->location() == Variable::CONTEXT);
+  ASSERT(variable->interface()->IsFrozen());
 
-  switch (variable->location()) {
-    case Variable::UNALLOCATED: {
-      Comment cmnt(masm_, "[ ModuleDeclaration");
-      globals_->Add(variable->name(), zone());
-      globals_->Add(instance, zone());
-      Visit(declaration->module());
-      break;
-    }
+  Comment cmnt(masm_, "[ ModuleDeclaration");
+  EmitDebugCheckDeclarationContext(variable);
 
-    case Variable::CONTEXT: {
-      Comment cmnt(masm_, "[ ModuleDeclaration");
-      EmitDebugCheckDeclarationContext(variable);
-      __ li(a1, Operand(instance));
-      __ sw(a1, ContextOperand(cp, variable->index()));
-      Visit(declaration->module());
-      break;
-    }
+  // Load instance object.
+  __ LoadContext(a1, scope_->ContextChainLength(scope_->GlobalScope()));
+  __ lw(a1, ContextOperand(a1, variable->interface()->Index()));
+  __ lw(a1, ContextOperand(a1, Context::EXTENSION_INDEX));
 
-    case Variable::PARAMETER:
-    case Variable::LOCAL:
-    case Variable::LOOKUP:
-      UNREACHABLE();
-  }
+  // Assign it.
+  __ sw(a1, ContextOperand(cp, variable->index()));
+  // We know that we have written a module, which is not a smi.
+  __ RecordWriteContextSlot(cp,
+                            Context::SlotOffset(variable->index()),
+                            a1,
+                            a3,
+                            kRAHasBeenSaved,
+                            kDontSaveFPRegs,
+                            EMIT_REMEMBERED_SET,
+                            OMIT_SMI_CHECK);
+  PrepareForBailoutForId(declaration->proxy()->id(), NO_REGISTERS);
+
+  // Traverse into body.
+  Visit(declaration->module());
 }
 
 
@@ -998,6 +984,14 @@ void FullCodeGenerator::DeclareGlobals(Handle<FixedArray> pairs) {
   __ li(a0, Operand(Smi::FromInt(DeclareGlobalsFlags())));
   __ Push(cp, a1, a0);
   __ CallRuntime(Runtime::kDeclareGlobals, 3);
+  // Return value is ignored.
+}
+
+
+void FullCodeGenerator::DeclareModules(Handle<FixedArray> descriptions) {
+  // Call the runtime to declare the modules.
+  __ Push(descriptions);
+  __ CallRuntime(Runtime::kDeclareModules, 1);
   // Return value is ignored.
 }
 
@@ -1254,7 +1248,7 @@ void FullCodeGenerator::VisitForInStatement(ForInStatement* stmt) {
   __ Addu(a0, a0, Operand(Smi::FromInt(1)));
   __ push(a0);
 
-  EmitStackCheck(stmt, &loop);
+  EmitBackEdgeBookkeeping(stmt, &loop);
   __ Branch(&loop);
 
   // Remove the pointers stored on the stack.
@@ -1402,9 +1396,9 @@ void FullCodeGenerator::EmitDynamicLookupFastCase(Variable* var,
   } else if (var->mode() == DYNAMIC_LOCAL) {
     Variable* local = var->local_if_not_shadowed();
     __ lw(v0, ContextSlotOperandCheckExtensions(local, slow));
-    if (local->mode() == CONST ||
-        local->mode() == CONST_HARMONY ||
-        local->mode() == LET) {
+    if (local->mode() == LET ||
+        local->mode() == CONST ||
+        local->mode() == CONST_HARMONY) {
       __ LoadRoot(at, Heap::kTheHoleValueRootIndex);
       __ subu(at, v0, at);  // Sub as compare: at == 0 on eq.
       if (local->mode() == CONST) {
@@ -1736,7 +1730,9 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
   if (has_fast_elements && constant_elements_values->map() ==
       isolate()->heap()->fixed_cow_array_map()) {
     FastCloneShallowArrayStub stub(
-        FastCloneShallowArrayStub::COPY_ON_WRITE_ELEMENTS, length);
+        FastCloneShallowArrayStub::COPY_ON_WRITE_ELEMENTS,
+        DONT_TRACK_ALLOCATION_SITE,
+        length);
     __ CallStub(&stub);
     __ IncrementCounter(isolate()->counters()->cow_arrays_created_stub(),
         1, a1, a2);
@@ -1747,10 +1743,17 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
   } else {
     ASSERT(IsFastSmiOrObjectElementsKind(constant_elements_kind) ||
            FLAG_smi_only_arrays);
-    FastCloneShallowArrayStub::Mode mode = has_fast_elements
-      ? FastCloneShallowArrayStub::CLONE_ELEMENTS
-      : FastCloneShallowArrayStub::CLONE_ANY_ELEMENTS;
-    FastCloneShallowArrayStub stub(mode, length);
+    FastCloneShallowArrayStub::Mode mode =
+        FastCloneShallowArrayStub::CLONE_ANY_ELEMENTS;
+    AllocationSiteMode allocation_site_mode = FLAG_track_allocation_sites
+        ? TRACK_ALLOCATION_SITE : DONT_TRACK_ALLOCATION_SITE;
+
+    if (has_fast_elements) {
+      mode = FastCloneShallowArrayStub::CLONE_ELEMENTS;
+      allocation_site_mode = DONT_TRACK_ALLOCATION_SITE;
+    }
+
+    FastCloneShallowArrayStub stub(mode, allocation_site_mode, length);
     __ CallStub(&stub);
   }
 
@@ -2053,7 +2056,7 @@ void FullCodeGenerator::EmitBinaryOp(BinaryOperation* expr,
 
 
 void FullCodeGenerator::EmitAssignment(Expression* expr) {
-  // Invalid left-hand sides are rewritten to have a 'throw
+  // Invalid left-hand sides are rewritten by the parser to have a 'throw
   // ReferenceError' on the left-hand side.
   if (!expr->IsValidLeftHandSide()) {
     VisitForEffect(expr);
@@ -2359,7 +2362,7 @@ void FullCodeGenerator::EmitCallWithStub(Call* expr, CallFunctionFlags flags) {
 
   CallFunctionStub stub(arg_count, flags);
   __ lw(a1, MemOperand(sp, (arg_count + 1) * kPointerSize));
-  __ CallStub(&stub);
+  __ CallStub(&stub, expr->CallFeedbackId());
   RecordJSReturnSite(expr);
   // Restore context register.
   __ lw(cp, MemOperand(fp, StandardFrameConstants::kContextOffset));
@@ -3148,6 +3151,38 @@ void FullCodeGenerator::EmitDateField(CallRuntime* expr) {
   __ bind(&not_date_object);
   __ CallRuntime(Runtime::kThrowNotDateError, 0);
   __ bind(&done);
+  context()->Plug(v0);
+}
+
+
+void FullCodeGenerator::EmitOneByteSeqStringSetChar(CallRuntime* expr) {
+  ZoneList<Expression*>* args = expr->arguments();
+  ASSERT_EQ(3, args->length());
+
+  VisitForStackValue(args->at(1));  // index
+  VisitForStackValue(args->at(2));  // value
+  __ pop(a2);
+  __ pop(a1);
+  VisitForAccumulatorValue(args->at(0));  // string
+
+  static const String::Encoding encoding = String::ONE_BYTE_ENCODING;
+  SeqStringSetCharGenerator::Generate(masm_, encoding, v0, a1, a2);
+  context()->Plug(v0);
+}
+
+
+void FullCodeGenerator::EmitTwoByteSeqStringSetChar(CallRuntime* expr) {
+  ZoneList<Expression*>* args = expr->arguments();
+  ASSERT_EQ(3, args->length());
+
+  VisitForStackValue(args->at(1));  // index
+  VisitForStackValue(args->at(2));  // value
+  __ pop(a2);
+  __ pop(a1);
+  VisitForAccumulatorValue(args->at(0));  // string
+
+  static const String::Encoding encoding = String::TWO_BYTE_ENCODING;
+  SeqStringSetCharGenerator::Generate(masm_, encoding, v0, a1, a2);
   context()->Plug(v0);
 }
 
@@ -4103,9 +4138,8 @@ void FullCodeGenerator::VisitCountOperation(CountOperation* expr) {
   JumpPatchSite patch_site(masm_);
 
   int count_value = expr->op() == Token::INC ? 1 : -1;
-  __ li(a1, Operand(Smi::FromInt(count_value)));
-
   if (ShouldInlineSmiCase(expr->op())) {
+    __ li(a1, Operand(Smi::FromInt(count_value)));
     __ AdduAndCheckForOverflow(v0, a0, a1, t0);
     __ BranchOnOverflow(&stub_call, t0);  // Do stub on overflow.
 
@@ -4114,6 +4148,8 @@ void FullCodeGenerator::VisitCountOperation(CountOperation* expr) {
     patch_site.EmitJumpIfSmi(v0, &done);
     __ bind(&stub_call);
   }
+  __ mov(a1, a0);
+  __ li(a0, Operand(Smi::FromInt(count_value)));
 
   // Record position before stub call.
   SetSourcePosition(expr->position());
@@ -4336,29 +4372,7 @@ void FullCodeGenerator::VisitCompareOperation(CompareOperation* expr) {
 
     default: {
       VisitForAccumulatorValue(expr->right());
-      Condition cc = eq;
-      switch (op) {
-        case Token::EQ_STRICT:
-        case Token::EQ:
-          cc = eq;
-          break;
-        case Token::LT:
-          cc = lt;
-          break;
-        case Token::GT:
-          cc = gt;
-         break;
-        case Token::LTE:
-          cc = le;
-          break;
-        case Token::GTE:
-          cc = ge;
-          break;
-        case Token::IN:
-        case Token::INSTANCEOF:
-        default:
-          UNREACHABLE();
-      }
+      Condition cc = CompareIC::ComputeCondition(op);
       __ mov(a0, result_register());
       __ pop(a1);
 

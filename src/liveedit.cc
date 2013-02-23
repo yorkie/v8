@@ -36,6 +36,7 @@
 #include "debug.h"
 #include "deoptimizer.h"
 #include "global-handles.h"
+#include "messages.h"
 #include "parser.h"
 #include "scopeinfo.h"
 #include "scopes.h"
@@ -541,7 +542,7 @@ class TokenizingLineArrayCompareOutput : public SubrangableOutput {
 
     if (char_len1 < CHUNK_LEN_LIMIT && char_len2 < CHUNK_LEN_LIMIT) {
       // Chunk is small enough to conduct a nested token-level diff.
-      HandleScope subTaskScope;
+      HandleScope subTaskScope(s1_->GetIsolate());
 
       TokensCompareInput tokens_input(s1_, char_pos1, char_len1,
                                       s2_, char_pos2, char_len2);
@@ -670,6 +671,9 @@ class JSArrayBasedStruct {
   Handle<JSArray> GetJSArray() {
     return array_;
   }
+  Isolate* isolate() const {
+    return array_->GetIsolate();
+  }
 
  protected:
   void SetField(int field_position, Handle<Object> value) {
@@ -705,7 +709,7 @@ class FunctionInfoWrapper : public JSArrayBasedStruct<FunctionInfoWrapper> {
   void SetInitialProperties(Handle<String> name, int start_position,
                             int end_position, int param_num,
                             int literal_count, int parent_index) {
-    HandleScope scope;
+    HandleScope scope(isolate());
     this->SetField(kFunctionNameOffset_, name);
     this->SetSmiValueField(kStartPositionOffset_, start_position);
     this->SetSmiValueField(kEndPositionOffset_, end_position);
@@ -787,7 +791,7 @@ class SharedInfoWrapper : public JSArrayBasedStruct<SharedInfoWrapper> {
 
   void SetProperties(Handle<String> name, int start_position, int end_position,
                      Handle<SharedFunctionInfo> info) {
-    HandleScope scope;
+    HandleScope scope(isolate());
     this->SetField(kFunctionNameOffset_, name);
     Handle<JSValue> info_holder = WrapInJSValue(info);
     this->SetField(kSharedInfoOffset_, info_holder);
@@ -821,7 +825,7 @@ class FunctionInfoListener {
   }
 
   void FunctionStarted(FunctionLiteral* fun) {
-    HandleScope scope;
+    HandleScope scope(result_->GetIsolate());
     FunctionInfoWrapper info = FunctionInfoWrapper::Create();
     info.SetInitialProperties(fun->name(), fun->start_position(),
                               fun->end_position(), fun->parameter_count(),
@@ -833,7 +837,7 @@ class FunctionInfoListener {
   }
 
   void FunctionDone() {
-    HandleScope scope;
+    HandleScope scope(result_->GetIsolate());
     FunctionInfoWrapper info =
         FunctionInfoWrapper::cast(
             result_->GetElementNoExceptionThrown(current_parent_index_));
@@ -863,17 +867,18 @@ class FunctionInfoListener {
         Handle<Object>(shared->scope_info()));
     info.SetSharedFunctionInfo(shared);
 
-    Handle<Object> scope_info_list(SerializeFunctionScope(scope, zone));
+    Handle<Object> scope_info_list(
+        SerializeFunctionScope(shared->GetIsolate(), scope, zone));
     info.SetOuterScopeInfo(scope_info_list);
   }
 
   Handle<JSArray> GetResult() { return result_; }
 
  private:
-  Object* SerializeFunctionScope(Scope* scope, Zone* zone) {
-    HandleScope handle_scope;
+  Object* SerializeFunctionScope(Isolate* isolate, Scope* scope, Zone* zone) {
+    HandleScope handle_scope(isolate);
 
-    Handle<JSArray> scope_info_list = FACTORY->NewJSArray(10);
+    Handle<JSArray> scope_info_list = isolate->factory()->NewJSArray(10);
     int scope_info_length = 0;
 
     // Saves some description of scope. It stores name and indexes of
@@ -881,7 +886,7 @@ class FunctionInfoListener {
     // scopes of this chain.
     Scope* outer_scope = scope->outer_scope();
     if (outer_scope == NULL) {
-      return HEAP->undefined_value();
+      return isolate->heap()->undefined_value();
     }
     do {
       ZoneList<Variable*> stack_list(outer_scope->StackLocalCount(), zone);
@@ -902,7 +907,7 @@ class FunctionInfoListener {
       }
       SetElementNonStrict(scope_info_list,
                           scope_info_length,
-                          Handle<Object>(HEAP->null_value()));
+                          Handle<Object>(isolate->heap()->null_value()));
       scope_info_length++;
 
       outer_scope = outer_scope->outer_scope();
@@ -925,16 +930,64 @@ JSArray* LiveEdit::GatherCompileInfo(Handle<Script> script,
   Handle<Object> original_source = Handle<Object>(script->source());
   script->set_source(*source);
   isolate->set_active_function_info_listener(&listener);
-  CompileScriptForTracker(isolate, script);
+
+  {
+    // Creating verbose TryCatch from public API is currently the only way to
+    // force code save location. We do not use this the object directly.
+    v8::TryCatch try_catch;
+    try_catch.SetVerbose(true);
+
+    // A logical 'try' section.
+    CompileScriptForTracker(isolate, script);
+  }
+
+  // A logical 'catch' section.
+  Handle<JSObject> rethrow_exception;
+  if (isolate->has_pending_exception()) {
+    Handle<Object> exception(isolate->pending_exception()->ToObjectChecked());
+    MessageLocation message_location = isolate->GetMessageLocation();
+
+    isolate->clear_pending_message();
+    isolate->clear_pending_exception();
+
+    // If possible, copy positions from message object to exception object.
+    if (exception->IsJSObject() && !message_location.script().is_null()) {
+      rethrow_exception = Handle<JSObject>::cast(exception);
+
+      Factory* factory = isolate->factory();
+      Handle<String> start_pos_key =
+          factory->LookupOneByteSymbol(STATIC_ASCII_VECTOR("startPosition"));
+      Handle<String> end_pos_key =
+          factory->LookupOneByteSymbol(STATIC_ASCII_VECTOR("endPosition"));
+      Handle<String> script_obj_key =
+          factory->LookupOneByteSymbol(STATIC_ASCII_VECTOR("scriptObject"));
+      Handle<Smi> start_pos(Smi::FromInt(message_location.start_pos()));
+      Handle<Smi> end_pos(Smi::FromInt(message_location.end_pos()));
+      Handle<JSValue> script_obj = GetScriptWrapper(message_location.script());
+      JSReceiver::SetProperty(
+          rethrow_exception, start_pos_key, start_pos, NONE, kNonStrictMode);
+      JSReceiver::SetProperty(
+          rethrow_exception, end_pos_key, end_pos, NONE, kNonStrictMode);
+      JSReceiver::SetProperty(
+          rethrow_exception, script_obj_key, script_obj, NONE, kNonStrictMode);
+    }
+  }
+
+  // A logical 'finally' section.
   isolate->set_active_function_info_listener(NULL);
   script->set_source(*original_source);
 
-  return *(listener.GetResult());
+  if (rethrow_exception.is_null()) {
+    return *(listener.GetResult());
+  } else {
+    isolate->Throw(*rethrow_exception);
+    return 0;
+  }
 }
 
 
 void LiveEdit::WrapSharedFunctionInfos(Handle<JSArray> array) {
-  HandleScope scope;
+  HandleScope scope(array->GetIsolate());
   int len = GetArrayLength(array);
   for (int i = 0; i < len; i++) {
     Handle<SharedFunctionInfo> info(
@@ -998,10 +1051,11 @@ static void ReplaceCodeObject(Handle<Code> original,
   // Since we are not in an incremental marking phase we can write pointers
   // to code objects (that are never in new space) without worrying about
   // write barriers.
-  HEAP->CollectAllGarbage(Heap::kMakeHeapIterableMask,
+  Heap* heap = original->GetHeap();
+  heap->CollectAllGarbage(Heap::kMakeHeapIterableMask,
                           "liveedit.cc ReplaceCodeObject");
 
-  ASSERT(!HEAP->InNewSpace(*substitution));
+  ASSERT(!heap->InNewSpace(*substitution));
 
   AssertNoAllocation no_allocations_please;
 
@@ -1010,11 +1064,11 @@ static void ReplaceCodeObject(Handle<Code> original,
   // Iterate over all roots. Stack frames may have pointer into original code,
   // so temporary replace the pointers with offset numbers
   // in prologue/epilogue.
-  HEAP->IterateRoots(&visitor, VISIT_ALL);
+  heap->IterateRoots(&visitor, VISIT_ALL);
 
   // Now iterate over all pointers of all objects, including code_target
   // implicit pointers.
-  HeapIterator iterator;
+  HeapIterator iterator(heap);
   for (HeapObject* obj = iterator.next(); obj != NULL; obj = iterator.next()) {
     obj->Iterate(&visitor);
   }
@@ -1080,7 +1134,7 @@ class LiteralFixer {
                                  Visitor* visitor) {
     AssertNoAllocation no_allocations_please;
 
-    HeapIterator iterator;
+    HeapIterator iterator(shared_info->GetHeap());
     for (HeapObject* obj = iterator.next(); obj != NULL;
         obj = iterator.next()) {
       if (obj->IsJSFunction()) {
@@ -1174,23 +1228,15 @@ static bool IsInlined(JSFunction* function, SharedFunctionInfo* candidate) {
 }
 
 
-class DependentFunctionsDeoptimizingVisitor : public OptimizedFunctionVisitor {
+class DependentFunctionFilter : public OptimizedFunctionFilter {
  public:
-  explicit DependentFunctionsDeoptimizingVisitor(
+  explicit DependentFunctionFilter(
       SharedFunctionInfo* function_info)
       : function_info_(function_info) {}
 
-  virtual void EnterContext(Context* context) {
-  }
-
-  virtual void VisitFunction(JSFunction* function) {
-    if (function->shared() == function_info_ ||
-        IsInlined(function, function_info_)) {
-      Deoptimizer::DeoptimizeFunction(function);
-    }
-  }
-
-  virtual void LeaveContext(Context* context) {
+  virtual bool TakeFunction(JSFunction* function) {
+    return (function->shared() == function_info_ ||
+            IsInlined(function, function_info_));
   }
 
  private:
@@ -1201,16 +1247,16 @@ class DependentFunctionsDeoptimizingVisitor : public OptimizedFunctionVisitor {
 static void DeoptimizeDependentFunctions(SharedFunctionInfo* function_info) {
   AssertNoAllocation no_allocation;
 
-  DependentFunctionsDeoptimizingVisitor visitor(function_info);
-  Deoptimizer::VisitAllOptimizedFunctions(&visitor);
+  DependentFunctionFilter filter(function_info);
+  Deoptimizer::DeoptimizeAllFunctionsWith(&filter);
 }
 
 
 MaybeObject* LiveEdit::ReplaceFunctionCode(
     Handle<JSArray> new_compile_info_array,
     Handle<JSArray> shared_info_array) {
-  HandleScope scope;
   Isolate* isolate = Isolate::Current();
+  HandleScope scope(isolate);
 
   if (!SharedInfoWrapper::IsInstance(shared_info_array)) {
     return isolate->ThrowIllegalOperation();
@@ -1221,7 +1267,7 @@ MaybeObject* LiveEdit::ReplaceFunctionCode(
 
   Handle<SharedFunctionInfo> shared_info = shared_info_wrapper.GetInfo();
 
-  HEAP->EnsureHeapIsIterable();
+  isolate->heap()->EnsureHeapIsIterable();
 
   if (IsJSFunctionCode(shared_info->code())) {
     Handle<Code> code = compile_info_wrapper.GetFunctionCode();
@@ -1247,31 +1293,31 @@ MaybeObject* LiveEdit::ReplaceFunctionCode(
   LiteralFixer::PatchLiterals(&compile_info_wrapper, shared_info, isolate);
 
   shared_info->set_construct_stub(
-      Isolate::Current()->builtins()->builtin(
-          Builtins::kJSConstructStubGeneric));
+      isolate->builtins()->builtin(Builtins::kJSConstructStubGeneric));
 
   DeoptimizeDependentFunctions(*shared_info);
-  Isolate::Current()->compilation_cache()->Remove(shared_info);
+  isolate->compilation_cache()->Remove(shared_info);
 
-  return HEAP->undefined_value();
+  return isolate->heap()->undefined_value();
 }
 
 
 MaybeObject* LiveEdit::FunctionSourceUpdated(
     Handle<JSArray> shared_info_array) {
-  HandleScope scope;
+  Isolate* isolate = shared_info_array->GetIsolate();
+  HandleScope scope(isolate);
 
   if (!SharedInfoWrapper::IsInstance(shared_info_array)) {
-    return Isolate::Current()->ThrowIllegalOperation();
+    return isolate->ThrowIllegalOperation();
   }
 
   SharedInfoWrapper shared_info_wrapper(shared_info_array);
   Handle<SharedFunctionInfo> shared_info = shared_info_wrapper.GetInfo();
 
   DeoptimizeDependentFunctions(*shared_info);
-  Isolate::Current()->compilation_cache()->Remove(shared_info);
+  isolate->compilation_cache()->Remove(shared_info);
 
-  return HEAP->undefined_value();
+  return isolate->heap()->undefined_value();
 }
 
 
@@ -1622,7 +1668,7 @@ static const char* DropFrames(Vector<StackFrame*> frames,
   Code* pre_top_frame_code = pre_top_frame->LookupCode();
   bool frame_has_padding;
   if (pre_top_frame_code->is_inline_cache_stub() &&
-      pre_top_frame_code->ic_state() == DEBUG_BREAK) {
+      pre_top_frame_code->is_debug_break()) {
     // OK, we can drop inline cache calls.
     *mode = Debug::FRAME_DROPPED_IN_IC_CALL;
     frame_has_padding = Debug::FramePaddingLayout::kIsSupported;
@@ -1772,7 +1818,7 @@ static const char* DropActivationsInActiveThreadImpl(
   Isolate* isolate = Isolate::Current();
   Debug* debug = isolate->debug();
   ZoneScope scope(zone, DELETE_ON_EXIT);
-  Vector<StackFrame*> frames = CreateStackMap(zone);
+  Vector<StackFrame*> frames = CreateStackMap(isolate, zone);
 
 
   int top_frame_index = -1;

@@ -26,8 +26,10 @@ static void InitializeVM() {
 // Go through all incremental marking steps in one swoop.
 static void SimulateIncrementalMarking() {
   IncrementalMarking* marking = HEAP->incremental_marking();
-  CHECK(marking->IsStopped());
-  marking->Start();
+  CHECK(marking->IsMarking() || marking->IsStopped());
+  if (marking->IsStopped()) {
+    marking->Start();
+  }
   CHECK(marking->IsMarking());
   while (!marking->IsComplete()) {
     marking->Step(MB, IncrementalMarking::NO_GC_VIA_STACK_GUARD);
@@ -60,7 +62,7 @@ static void CheckOddball(Object* obj, const char* string) {
   CHECK(obj->IsOddball());
   bool exc;
   Object* print_string = *Execution::ToString(Handle<Object>(obj), &exc);
-  CHECK(String::cast(print_string)->IsEqualTo(CStrVector(string)));
+  CHECK(String::cast(print_string)->IsUtf8EqualTo(CStrVector(string)));
 }
 
 
@@ -68,7 +70,7 @@ static void CheckSmi(int value, const char* string) {
   bool exc;
   Object* print_string =
       *Execution::ToString(Handle<Object>(Smi::FromInt(value)), &exc);
-  CHECK(String::cast(print_string)->IsEqualTo(CStrVector(string)));
+  CHECK(String::cast(print_string)->IsUtf8EqualTo(CStrVector(string)));
 }
 
 
@@ -77,7 +79,7 @@ static void CheckNumber(double value, const char* string) {
   CHECK(obj->IsNumber());
   bool exc;
   Object* print_string = *Execution::ToString(Handle<Object>(obj), &exc);
-  CHECK(String::cast(print_string)->IsEqualTo(CStrVector(string)));
+  CHECK(String::cast(print_string)->IsUtf8EqualTo(CStrVector(string)));
 }
 
 
@@ -162,6 +164,13 @@ TEST(HeapObjects) {
   CHECK_EQ(static_cast<double>(static_cast<uint32_t>(Smi::kMaxValue) + 1),
            value->Number());
 
+  maybe_value = HEAP->NumberFromUint32(static_cast<uint32_t>(1) << 31);
+  value = maybe_value->ToObjectChecked();
+  CHECK(value->IsHeapNumber());
+  CHECK(value->IsNumber());
+  CHECK_EQ(static_cast<double>(static_cast<uint32_t>(1) << 31),
+           value->Number());
+
   // nan oddball checks
   CHECK(HEAP->nan_value()->IsNumber());
   CHECK(isnan(HEAP->nan_value()->Number()));
@@ -211,28 +220,31 @@ TEST(Tagging) {
 
 TEST(GarbageCollection) {
   InitializeVM();
+  Isolate* isolate = Isolate::Current();
+  Heap* heap = isolate->heap();
+  Factory* factory = isolate->factory();
 
   v8::HandleScope sc;
   // Check GC.
-  HEAP->CollectGarbage(NEW_SPACE);
+  heap->CollectGarbage(NEW_SPACE);
 
-  Handle<String> name = FACTORY->LookupAsciiSymbol("theFunction");
-  Handle<String> prop_name = FACTORY->LookupAsciiSymbol("theSlot");
-  Handle<String> prop_namex = FACTORY->LookupAsciiSymbol("theSlotx");
-  Handle<String> obj_name = FACTORY->LookupAsciiSymbol("theObject");
+  Handle<String> name = factory->LookupUtf8Symbol("theFunction");
+  Handle<String> prop_name = factory->LookupUtf8Symbol("theSlot");
+  Handle<String> prop_namex = factory->LookupUtf8Symbol("theSlotx");
+  Handle<String> obj_name = factory->LookupUtf8Symbol("theObject");
 
   {
-    v8::HandleScope inner_scope;
+    HandleScope inner_scope(isolate);
     // Allocate a function and keep it in global object's property.
     Handle<JSFunction> function =
-        FACTORY->NewFunction(name, FACTORY->undefined_value());
+        factory->NewFunction(name, factory->undefined_value());
     Handle<Map> initial_map =
-        FACTORY->NewMap(JS_OBJECT_TYPE, JSObject::kHeaderSize);
+        factory->NewMap(JS_OBJECT_TYPE, JSObject::kHeaderSize);
     function->set_initial_map(*initial_map);
     Isolate::Current()->context()->global_object()->SetProperty(
         *name, *function, NONE, kNonStrictMode)->ToObjectChecked();
     // Allocate an object.  Unrooted after leaving the scope.
-    Handle<JSObject> obj = FACTORY->NewJSObject(function);
+    Handle<JSObject> obj = factory->NewJSObject(function);
     obj->SetProperty(
         *prop_name, Smi::FromInt(23), NONE, kNonStrictMode)->ToObjectChecked();
     obj->SetProperty(
@@ -242,7 +254,7 @@ TEST(GarbageCollection) {
     CHECK_EQ(Smi::FromInt(24), obj->GetProperty(*prop_namex));
   }
 
-  HEAP->CollectGarbage(NEW_SPACE);
+  heap->CollectGarbage(NEW_SPACE);
 
   // Function should be alive.
   CHECK(Isolate::Current()->context()->global_object()->
@@ -254,9 +266,9 @@ TEST(GarbageCollection) {
   Handle<JSFunction> function(JSFunction::cast(func_value));
 
   {
-    HandleScope inner_scope;
+    HandleScope inner_scope(isolate);
     // Allocate another object, make it reachable from global.
-    Handle<JSObject> obj = FACTORY->NewJSObject(function);
+    Handle<JSObject> obj = factory->NewJSObject(function);
     Isolate::Current()->context()->global_object()->SetProperty(
         *obj_name, *obj, NONE, kNonStrictMode)->ToObjectChecked();
     obj->SetProperty(
@@ -264,7 +276,7 @@ TEST(GarbageCollection) {
   }
 
   // After gc, it should survive.
-  HEAP->CollectGarbage(NEW_SPACE);
+  heap->CollectGarbage(NEW_SPACE);
 
   CHECK(Isolate::Current()->context()->global_object()->
         HasLocalProperty(*obj_name));
@@ -310,7 +322,10 @@ TEST(LocalHandles) {
 
 TEST(GlobalHandles) {
   InitializeVM();
-  GlobalHandles* global_handles = Isolate::Current()->global_handles();
+  Isolate* isolate = Isolate::Current();
+  Heap* heap = isolate->heap();
+  Factory* factory = isolate->factory();
+  GlobalHandles* global_handles = isolate->global_handles();
 
   Handle<Object> h1;
   Handle<Object> h2;
@@ -318,10 +333,10 @@ TEST(GlobalHandles) {
   Handle<Object> h4;
 
   {
-    HandleScope scope;
+    HandleScope scope(isolate);
 
-    Handle<Object> i = FACTORY->NewStringFromAscii(CStrVector("fisk"));
-    Handle<Object> u = FACTORY->NewNumber(1.12344);
+    Handle<Object> i = factory->NewStringFromAscii(CStrVector("fisk"));
+    Handle<Object> u = factory->NewNumber(1.12344);
 
     h1 = global_handles->Create(*i);
     h2 = global_handles->Create(*u);
@@ -330,7 +345,7 @@ TEST(GlobalHandles) {
   }
 
   // after gc, it should survive
-  HEAP->CollectGarbage(NEW_SPACE);
+  heap->CollectGarbage(NEW_SPACE);
 
   CHECK((*h1)->IsString());
   CHECK((*h2)->IsHeapNumber());
@@ -349,16 +364,20 @@ TEST(GlobalHandles) {
 
 static bool WeakPointerCleared = false;
 
-static void TestWeakGlobalHandleCallback(v8::Persistent<v8::Value> handle,
+static void TestWeakGlobalHandleCallback(v8::Isolate* isolate,
+                                         v8::Persistent<v8::Value> handle,
                                          void* id) {
   if (1234 == reinterpret_cast<intptr_t>(id)) WeakPointerCleared = true;
-  handle.Dispose();
+  handle.Dispose(isolate);
 }
 
 
 TEST(WeakGlobalHandlesScavenge) {
   InitializeVM();
-  GlobalHandles* global_handles = Isolate::Current()->global_handles();
+  Isolate* isolate = Isolate::Current();
+  Heap* heap = isolate->heap();
+  Factory* factory = isolate->factory();
+  GlobalHandles* global_handles = isolate->global_handles();
 
   WeakPointerCleared = false;
 
@@ -366,10 +385,10 @@ TEST(WeakGlobalHandlesScavenge) {
   Handle<Object> h2;
 
   {
-    HandleScope scope;
+    HandleScope scope(isolate);
 
-    Handle<Object> i = FACTORY->NewStringFromAscii(CStrVector("fisk"));
-    Handle<Object> u = FACTORY->NewNumber(1.12344);
+    Handle<Object> i = factory->NewStringFromAscii(CStrVector("fisk"));
+    Handle<Object> u = factory->NewNumber(1.12344);
 
     h1 = global_handles->Create(*i);
     h2 = global_handles->Create(*u);
@@ -377,10 +396,11 @@ TEST(WeakGlobalHandlesScavenge) {
 
   global_handles->MakeWeak(h2.location(),
                            reinterpret_cast<void*>(1234),
+                           NULL,
                            &TestWeakGlobalHandleCallback);
 
   // Scavenge treats weak pointers as normal roots.
-  HEAP->PerformScavenge();
+  heap->PerformScavenge();
 
   CHECK((*h1)->IsString());
   CHECK((*h2)->IsHeapNumber());
@@ -396,7 +416,10 @@ TEST(WeakGlobalHandlesScavenge) {
 
 TEST(WeakGlobalHandlesMark) {
   InitializeVM();
-  GlobalHandles* global_handles = Isolate::Current()->global_handles();
+  Isolate* isolate = Isolate::Current();
+  Heap* heap = isolate->heap();
+  Factory* factory = isolate->factory();
+  GlobalHandles* global_handles = isolate->global_handles();
 
   WeakPointerCleared = false;
 
@@ -404,26 +427,29 @@ TEST(WeakGlobalHandlesMark) {
   Handle<Object> h2;
 
   {
-    HandleScope scope;
+    HandleScope scope(isolate);
 
-    Handle<Object> i = FACTORY->NewStringFromAscii(CStrVector("fisk"));
-    Handle<Object> u = FACTORY->NewNumber(1.12344);
+    Handle<Object> i = factory->NewStringFromAscii(CStrVector("fisk"));
+    Handle<Object> u = factory->NewNumber(1.12344);
 
     h1 = global_handles->Create(*i);
     h2 = global_handles->Create(*u);
   }
 
-  HEAP->CollectGarbage(OLD_POINTER_SPACE);
-  HEAP->CollectGarbage(NEW_SPACE);
-  // Make sure the object is promoted.
+  // Make sure the objects are promoted.
+  heap->CollectGarbage(OLD_POINTER_SPACE);
+  heap->CollectGarbage(NEW_SPACE);
+  CHECK(!heap->InNewSpace(*h1) && !heap->InNewSpace(*h2));
 
   global_handles->MakeWeak(h2.location(),
                            reinterpret_cast<void*>(1234),
+                           NULL,
                            &TestWeakGlobalHandleCallback);
   CHECK(!GlobalHandles::IsNearDeath(h1.location()));
   CHECK(!GlobalHandles::IsNearDeath(h2.location()));
 
-  HEAP->CollectGarbage(OLD_POINTER_SPACE);
+  // Incremental marking potentially marked handles before they turned weak.
+  heap->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
 
   CHECK((*h1)->IsString());
 
@@ -436,30 +462,34 @@ TEST(WeakGlobalHandlesMark) {
 
 TEST(DeleteWeakGlobalHandle) {
   InitializeVM();
-  GlobalHandles* global_handles = Isolate::Current()->global_handles();
+  Isolate* isolate = Isolate::Current();
+  Heap* heap = isolate->heap();
+  Factory* factory = isolate->factory();
+  GlobalHandles* global_handles = isolate->global_handles();
 
   WeakPointerCleared = false;
 
   Handle<Object> h;
 
   {
-    HandleScope scope;
+    HandleScope scope(isolate);
 
-    Handle<Object> i = FACTORY->NewStringFromAscii(CStrVector("fisk"));
+    Handle<Object> i = factory->NewStringFromAscii(CStrVector("fisk"));
     h = global_handles->Create(*i);
   }
 
   global_handles->MakeWeak(h.location(),
                            reinterpret_cast<void*>(1234),
+                           NULL,
                            &TestWeakGlobalHandleCallback);
 
   // Scanvenge does not recognize weak reference.
-  HEAP->PerformScavenge();
+  heap->PerformScavenge();
 
   CHECK(!WeakPointerCleared);
 
   // Mark-compact treats weak reference properly.
-  HEAP->CollectGarbage(OLD_POINTER_SPACE);
+  heap->CollectGarbage(OLD_POINTER_SPACE);
 
   CHECK(WeakPointerCleared);
 }
@@ -532,15 +562,15 @@ static const char* not_so_random_string_table[] = {
 static void CheckSymbols(const char** strings) {
   for (const char* string = *strings; *strings != 0; string = *strings++) {
     Object* a;
-    MaybeObject* maybe_a = HEAP->LookupAsciiSymbol(string);
-    // LookupAsciiSymbol may return a failure if a GC is needed.
+    MaybeObject* maybe_a = HEAP->LookupUtf8Symbol(string);
+    // LookupUtf8Symbol may return a failure if a GC is needed.
     if (!maybe_a->ToObject(&a)) continue;
     CHECK(a->IsSymbol());
     Object* b;
-    MaybeObject* maybe_b = HEAP->LookupAsciiSymbol(string);
+    MaybeObject* maybe_b = HEAP->LookupUtf8Symbol(string);
     if (!maybe_b->ToObject(&b)) continue;
     CHECK_EQ(b, a);
-    CHECK(String::cast(b)->IsEqualTo(CStrVector(string)));
+    CHECK(String::cast(b)->IsUtf8EqualTo(CStrVector(string)));
   }
 }
 
@@ -557,14 +587,14 @@ TEST(FunctionAllocation) {
   InitializeVM();
 
   v8::HandleScope sc;
-  Handle<String> name = FACTORY->LookupAsciiSymbol("theFunction");
+  Handle<String> name = FACTORY->LookupUtf8Symbol("theFunction");
   Handle<JSFunction> function =
       FACTORY->NewFunction(name, FACTORY->undefined_value());
   Handle<Map> initial_map =
       FACTORY->NewMap(JS_OBJECT_TYPE, JSObject::kHeaderSize);
   function->set_initial_map(*initial_map);
 
-  Handle<String> prop_name = FACTORY->LookupAsciiSymbol("theSlot");
+  Handle<String> prop_name = FACTORY->LookupUtf8Symbol("theSlot");
   Handle<JSObject> obj = FACTORY->NewJSObject(function);
   obj->SetProperty(
       *prop_name, Smi::FromInt(23), NONE, kNonStrictMode)->ToObjectChecked();
@@ -586,8 +616,8 @@ TEST(ObjectProperties) {
   JSFunction* object_function = JSFunction::cast(raw_object);
   Handle<JSFunction> constructor(object_function);
   Handle<JSObject> obj = FACTORY->NewJSObject(constructor);
-  Handle<String> first = FACTORY->LookupAsciiSymbol("first");
-  Handle<String> second = FACTORY->LookupAsciiSymbol("second");
+  Handle<String> first = FACTORY->LookupUtf8Symbol("first");
+  Handle<String> second = FACTORY->LookupUtf8Symbol("second");
 
   // check for empty
   CHECK(!obj->HasLocalProperty(*first));
@@ -636,12 +666,12 @@ TEST(ObjectProperties) {
   Handle<String> s1 = FACTORY->NewStringFromAscii(CStrVector(string1));
   obj->SetProperty(
       *s1, Smi::FromInt(1), NONE, kNonStrictMode)->ToObjectChecked();
-  Handle<String> s1_symbol = FACTORY->LookupAsciiSymbol(string1);
+  Handle<String> s1_symbol = FACTORY->LookupUtf8Symbol(string1);
   CHECK(obj->HasLocalProperty(*s1_symbol));
 
   // check symbol and string match
   const char* string2 = "fugl";
-  Handle<String> s2_symbol = FACTORY->LookupAsciiSymbol(string2);
+  Handle<String> s2_symbol = FACTORY->LookupUtf8Symbol(string2);
   obj->SetProperty(
       *s2_symbol, Smi::FromInt(1), NONE, kNonStrictMode)->ToObjectChecked();
   Handle<String> s2 = FACTORY->NewStringFromAscii(CStrVector(string2));
@@ -653,14 +683,14 @@ TEST(JSObjectMaps) {
   InitializeVM();
 
   v8::HandleScope sc;
-  Handle<String> name = FACTORY->LookupAsciiSymbol("theFunction");
+  Handle<String> name = FACTORY->LookupUtf8Symbol("theFunction");
   Handle<JSFunction> function =
       FACTORY->NewFunction(name, FACTORY->undefined_value());
   Handle<Map> initial_map =
       FACTORY->NewMap(JS_OBJECT_TYPE, JSObject::kHeaderSize);
   function->set_initial_map(*initial_map);
 
-  Handle<String> prop_name = FACTORY->LookupAsciiSymbol("theSlot");
+  Handle<String> prop_name = FACTORY->LookupUtf8Symbol("theSlot");
   Handle<JSObject> obj = FACTORY->NewJSObject(function);
 
   // Set a propery
@@ -677,7 +707,7 @@ TEST(JSArray) {
   InitializeVM();
 
   v8::HandleScope sc;
-  Handle<String> name = FACTORY->LookupAsciiSymbol("Array");
+  Handle<String> name = FACTORY->LookupUtf8Symbol("Array");
   Object* raw_object = Isolate::Current()->context()->global_object()->
       GetProperty(*name)->ToObjectChecked();
   Handle<JSFunction> function = Handle<JSFunction>(
@@ -730,8 +760,8 @@ TEST(JSObjectCopy) {
   JSFunction* object_function = JSFunction::cast(raw_object);
   Handle<JSFunction> constructor(object_function);
   Handle<JSObject> obj = FACTORY->NewJSObject(constructor);
-  Handle<String> first = FACTORY->LookupAsciiSymbol("first");
-  Handle<String> second = FACTORY->LookupAsciiSymbol("second");
+  Handle<String> first = FACTORY->LookupUtf8Symbol("first");
+  Handle<String> second = FACTORY->LookupUtf8Symbol("second");
 
   obj->SetProperty(
       *first, Smi::FromInt(1), NONE, kNonStrictMode)->ToObjectChecked();
@@ -786,10 +816,10 @@ TEST(StringAllocation) {
       non_ascii[3 * i + 2] = chars[2];
     }
     Handle<String> non_ascii_sym =
-        FACTORY->LookupSymbol(Vector<const char>(non_ascii, 3 * length));
+        FACTORY->LookupUtf8Symbol(Vector<const char>(non_ascii, 3 * length));
     CHECK_EQ(length, non_ascii_sym->length());
     Handle<String> ascii_sym =
-        FACTORY->LookupSymbol(Vector<const char>(ascii, length));
+        FACTORY->LookupOneByteSymbol(OneByteVector(ascii, length));
     CHECK_EQ(length, ascii_sym->length());
     Handle<String> non_ascii_str =
         FACTORY->NewStringFromUtf8(Vector<const char>(non_ascii, 3 * length));
@@ -805,10 +835,10 @@ TEST(StringAllocation) {
 }
 
 
-static int ObjectsFoundInHeap(Handle<Object> objs[], int size) {
+static int ObjectsFoundInHeap(Heap* heap, Handle<Object> objs[], int size) {
   // Count the number of objects found in the heap.
   int found_count = 0;
-  HeapIterator iterator;
+  HeapIterator iterator(heap);
   for (HeapObject* obj = iterator.next(); obj != NULL; obj = iterator.next()) {
     for (int i = 0; i < size; i++) {
       if (*objs[i] == obj) {
@@ -854,7 +884,7 @@ TEST(Iteration) {
   objs[next_objs_index++] = Handle<Map>(HeapObject::cast(*objs[0])->map());
 
   CHECK_EQ(objs_count, next_objs_index);
-  CHECK_EQ(objs_count, ObjectsFoundInHeap(objs, objs_count));
+  CHECK_EQ(objs_count, ObjectsFoundInHeap(HEAP, objs, objs_count));
 }
 
 
@@ -966,7 +996,7 @@ TEST(TestCodeFlushing) {
                        "  var z = x + y;"
                        "};"
                        "foo()";
-  Handle<String> foo_name = FACTORY->LookupAsciiSymbol("foo");
+  Handle<String> foo_name = FACTORY->LookupUtf8Symbol("foo");
 
   // This compile will add the code to the compilation cache.
   { v8::HandleScope scope;
@@ -981,8 +1011,8 @@ TEST(TestCodeFlushing) {
   CHECK(function->shared()->is_compiled());
 
   // The code will survive at least two GCs.
-  HEAP->CollectAllGarbage(Heap::kNoGCFlags);
-  HEAP->CollectAllGarbage(Heap::kNoGCFlags);
+  HEAP->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
+  HEAP->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
   CHECK(function->shared()->is_compiled());
 
   // Simulate several GCs that use full marking.
@@ -1013,7 +1043,7 @@ TEST(TestCodeFlushingIncremental) {
                        "  var z = x + y;"
                        "};"
                        "foo()";
-  Handle<String> foo_name = FACTORY->LookupAsciiSymbol("foo");
+  Handle<String> foo_name = FACTORY->LookupUtf8Symbol("foo");
 
   // This compile will add the code to the compilation cache.
   { v8::HandleScope scope;
@@ -1028,14 +1058,13 @@ TEST(TestCodeFlushingIncremental) {
   CHECK(function->shared()->is_compiled());
 
   // The code will survive at least two GCs.
-  HEAP->CollectAllGarbage(Heap::kNoGCFlags);
-  HEAP->CollectAllGarbage(Heap::kNoGCFlags);
+  HEAP->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
+  HEAP->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
   CHECK(function->shared()->is_compiled());
 
   // Simulate several GCs that use incremental marking.
   const int kAgingThreshold = 6;
   for (int i = 0; i < kAgingThreshold; i++) {
-    HEAP->incremental_marking()->Abort();
     SimulateIncrementalMarking();
     HEAP->CollectAllGarbage(Heap::kNoGCFlags);
   }
@@ -1050,7 +1079,6 @@ TEST(TestCodeFlushingIncremental) {
   // Simulate several GCs that use incremental marking but make sure
   // the loop breaks once the function is enqueued as a candidate.
   for (int i = 0; i < kAgingThreshold; i++) {
-    HEAP->incremental_marking()->Abort();
     SimulateIncrementalMarking();
     if (!function->next_function_link()->IsUndefined()) break;
     HEAP->CollectAllGarbage(Heap::kNoGCFlags);
@@ -1085,11 +1113,11 @@ TEST(TestCodeFlushingIncrementalScavenge) {
                        "  var x = 23;"
                        "};"
                        "bar();";
-  Handle<String> foo_name = FACTORY->LookupAsciiSymbol("foo");
-  Handle<String> bar_name = FACTORY->LookupAsciiSymbol("bar");
+  Handle<String> foo_name = FACTORY->LookupUtf8Symbol("foo");
+  Handle<String> bar_name = FACTORY->LookupUtf8Symbol("bar");
 
   // Perfrom one initial GC to enable code flushing.
-  HEAP->CollectAllGarbage(Heap::kNoGCFlags);
+  HEAP->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
 
   // This compile will add the code to the compilation cache.
   { v8::HandleScope scope;
@@ -1116,8 +1144,10 @@ TEST(TestCodeFlushingIncrementalScavenge) {
   // Bump the code age so that flushing is triggered while the function
   // object is still located in new-space.
   const int kAgingThreshold = 6;
-  function->shared()->set_code_age(kAgingThreshold);
-  function2->shared()->set_code_age(kAgingThreshold);
+  for (int i = 0; i < kAgingThreshold; i++) {
+    function->shared()->code()->MakeOlder(static_cast<MarkingParity>(i % 2));
+    function2->shared()->code()->MakeOlder(static_cast<MarkingParity>(i % 2));
+  }
 
   // Simulate incremental marking so that the functions are enqueued as
   // code flushing candidates. Then kill one of the functions. Finally
@@ -1138,6 +1168,8 @@ TEST(TestCodeFlushingIncrementalAbort) {
   if (!FLAG_flush_code || !FLAG_flush_code_incrementally) return;
   i::FLAG_allow_natives_syntax = true;
   InitializeVM();
+  Isolate* isolate = Isolate::Current();
+  Heap* heap = isolate->heap();
   v8::HandleScope scope;
   const char* source = "function foo() {"
                        "  var x = 42;"
@@ -1145,7 +1177,7 @@ TEST(TestCodeFlushingIncrementalAbort) {
                        "  var z = x + y;"
                        "};"
                        "foo()";
-  Handle<String> foo_name = FACTORY->LookupAsciiSymbol("foo");
+  Handle<String> foo_name = FACTORY->LookupUtf8Symbol("foo");
 
   // This compile will add the code to the compilation cache.
   { v8::HandleScope scope;
@@ -1160,13 +1192,15 @@ TEST(TestCodeFlushingIncrementalAbort) {
   CHECK(function->shared()->is_compiled());
 
   // The code will survive at least two GCs.
-  HEAP->CollectAllGarbage(Heap::kNoGCFlags);
-  HEAP->CollectAllGarbage(Heap::kNoGCFlags);
+  heap->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
+  heap->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
   CHECK(function->shared()->is_compiled());
 
   // Bump the code age so that flushing is triggered.
   const int kAgingThreshold = 6;
-  function->shared()->set_code_age(kAgingThreshold);
+  for (int i = 0; i < kAgingThreshold; i++) {
+    function->shared()->code()->MakeOlder(static_cast<MarkingParity>(i % 2));
+  }
 
   // Simulate incremental marking so that the function is enqueued as
   // code flushing candidate.
@@ -1177,8 +1211,8 @@ TEST(TestCodeFlushingIncrementalAbort) {
   // disabled.
   int position = 0;
   Handle<Object> breakpoint_object(Smi::FromInt(0));
-  ISOLATE->debug()->SetBreakPoint(function, breakpoint_object, &position);
-  ISOLATE->debug()->ClearAllBreakPoints();
+  isolate->debug()->SetBreakPoint(function, breakpoint_object, &position);
+  isolate->debug()->ClearAllBreakPoints();
 
   // Force optimization now that code flushing is disabled.
   { v8::HandleScope scope;
@@ -1186,7 +1220,7 @@ TEST(TestCodeFlushingIncrementalAbort) {
   }
 
   // Simulate one final GC to make sure the candidate queue is sane.
-  HEAP->CollectAllGarbage(Heap::kNoGCFlags);
+  heap->CollectAllGarbage(Heap::kNoGCFlags);
   CHECK(function->shared()->is_compiled() || !function->IsOptimized());
   CHECK(function->is_compiled() || !function->IsOptimized());
 }
@@ -1221,8 +1255,14 @@ static int CountOptimizedUserFunctions(v8::Handle<v8::Context> context) {
 TEST(TestInternalWeakLists) {
   v8::V8::Initialize();
 
+  // Some flags turn Scavenge collections into Mark-sweep collections
+  // and hence are incompatible with this test case.
+  if (FLAG_gc_global || FLAG_stress_compaction) return;
+
   static const int kNumTestContexts = 10;
 
+  Isolate* isolate = Isolate::Current();
+  Heap* heap = isolate->heap();
   v8::HandleScope scope;
   v8::Persistent<v8::Context> ctx[kNumTestContexts];
 
@@ -1269,8 +1309,8 @@ TEST(TestInternalWeakLists) {
     }
 
     // Mark compact handles the weak references.
-    ISOLATE->compilation_cache()->Clear();
-    HEAP->CollectAllGarbage(Heap::kNoGCFlags);
+    isolate->compilation_cache()->Clear();
+    heap->CollectAllGarbage(Heap::kNoGCFlags);
     CHECK_EQ(opt ? 4 : 0, CountOptimizedUserFunctions(ctx[i]));
 
     // Get rid of f3 and f5 in the same way.
@@ -1297,7 +1337,7 @@ TEST(TestInternalWeakLists) {
 
   // Dispose the native contexts one by one.
   for (int i = 0; i < kNumTestContexts; i++) {
-    ctx[i].Dispose();
+    ctx[i].Dispose(ctx[i]->GetIsolate());
     ctx[i].Clear();
 
     // Scavenge treats these references as strong.
@@ -1409,7 +1449,7 @@ TEST(TestSizeOfObjects) {
   HEAP->CollectAllGarbage(Heap::kNoGCFlags);
   HEAP->CollectAllGarbage(Heap::kNoGCFlags);
   HEAP->CollectAllGarbage(Heap::kNoGCFlags);
-  CHECK(HEAP->old_pointer_space()->IsSweepingComplete());
+  CHECK(HEAP->old_pointer_space()->IsLazySweepingComplete());
   int initial_size = static_cast<int>(HEAP->SizeOfObjects());
 
   {
@@ -1433,7 +1473,7 @@ TEST(TestSizeOfObjects) {
   CHECK_EQ(initial_size, static_cast<int>(HEAP->SizeOfObjects()));
 
   // Advancing the sweeper step-wise should not change the heap size.
-  while (!HEAP->old_pointer_space()->IsSweepingComplete()) {
+  while (!HEAP->old_pointer_space()->IsLazySweepingComplete()) {
     HEAP->old_pointer_space()->AdvanceSweeper(KB);
     CHECK_EQ(initial_size, static_cast<int>(HEAP->SizeOfObjects()));
   }
@@ -1444,7 +1484,7 @@ TEST(TestSizeOfObjectsVsHeapIteratorPrecision) {
   InitializeVM();
   HEAP->EnsureHeapIsIterable();
   intptr_t size_of_objects_1 = HEAP->SizeOfObjects();
-  HeapIterator iterator;
+  HeapIterator iterator(HEAP);
   intptr_t size_of_objects_2 = 0;
   for (HeapObject* obj = iterator.next();
        obj != NULL;
@@ -1565,7 +1605,7 @@ TEST(CollectingAllAvailableGarbageShrinksNewSpace) {
 
 static int NumberOfGlobalObjects() {
   int count = 0;
-  HeapIterator iterator;
+  HeapIterator iterator(HEAP);
   for (HeapObject* obj = iterator.next(); obj != NULL; obj = iterator.next()) {
     if (obj->IsGlobalObject()) count++;
   }
@@ -1600,12 +1640,12 @@ TEST(LeakNativeContextViaMap) {
     ctx2->Global()->Set(v8_str("o"), v8::Int32::New(0));
     ctx2->Exit();
     ctx1->Exit();
-    ctx1.Dispose();
+    ctx1.Dispose(ctx1->GetIsolate());
     v8::V8::ContextDisposedNotification();
   }
   HEAP->CollectAllAvailableGarbage();
   CHECK_EQ(2, NumberOfGlobalObjects());
-  ctx2.Dispose();
+  ctx2.Dispose(ctx2->GetIsolate());
   HEAP->CollectAllAvailableGarbage();
   CHECK_EQ(0, NumberOfGlobalObjects());
 }
@@ -1638,12 +1678,12 @@ TEST(LeakNativeContextViaFunction) {
     ctx2->Global()->Set(v8_str("o"), v8::Int32::New(0));
     ctx2->Exit();
     ctx1->Exit();
-    ctx1.Dispose();
+    ctx1.Dispose(ctx1->GetIsolate());
     v8::V8::ContextDisposedNotification();
   }
   HEAP->CollectAllAvailableGarbage();
   CHECK_EQ(2, NumberOfGlobalObjects());
-  ctx2.Dispose();
+  ctx2.Dispose(ctx2->GetIsolate());
   HEAP->CollectAllAvailableGarbage();
   CHECK_EQ(0, NumberOfGlobalObjects());
 }
@@ -1674,12 +1714,12 @@ TEST(LeakNativeContextViaMapKeyed) {
     ctx2->Global()->Set(v8_str("o"), v8::Int32::New(0));
     ctx2->Exit();
     ctx1->Exit();
-    ctx1.Dispose();
+    ctx1.Dispose(ctx1->GetIsolate());
     v8::V8::ContextDisposedNotification();
   }
   HEAP->CollectAllAvailableGarbage();
   CHECK_EQ(2, NumberOfGlobalObjects());
-  ctx2.Dispose();
+  ctx2.Dispose(ctx2->GetIsolate());
   HEAP->CollectAllAvailableGarbage();
   CHECK_EQ(0, NumberOfGlobalObjects());
 }
@@ -1714,12 +1754,12 @@ TEST(LeakNativeContextViaMapProto) {
     ctx2->Global()->Set(v8_str("o"), v8::Int32::New(0));
     ctx2->Exit();
     ctx1->Exit();
-    ctx1.Dispose();
+    ctx1.Dispose(ctx1->GetIsolate());
     v8::V8::ContextDisposedNotification();
   }
   HEAP->CollectAllAvailableGarbage();
   CHECK_EQ(2, NumberOfGlobalObjects());
-  ctx2.Dispose();
+  ctx2.Dispose(ctx2->GetIsolate());
   HEAP->CollectAllAvailableGarbage();
   CHECK_EQ(0, NumberOfGlobalObjects());
 }
@@ -1779,10 +1819,6 @@ TEST(InstanceOfStubWriteBarrier) {
   HEAP->incremental_marking()->set_should_hurry(true);
   HEAP->CollectGarbage(OLD_POINTER_SPACE);
 }
-
-
-// Implemented in the test-alloc.cc test suite.
-void SimulateFullSpace(PagedSpace* space);
 
 
 TEST(PrototypeTransitionClearing) {
@@ -1946,9 +1982,10 @@ TEST(OptimizedAllocationAlwaysInNewSpace) {
   i::FLAG_allow_natives_syntax = true;
   InitializeVM();
   if (!i::V8::UseCrankshaft() || i::FLAG_always_opt) return;
+  if (i::FLAG_gc_global || i::FLAG_stress_compaction) return;
   v8::HandleScope scope;
 
-  FillUpNewSpace(HEAP->new_space());
+  SimulateFullSpace(HEAP->new_space());
   AlwaysAllocateScope always_allocate;
   v8::Local<v8::Value> res = CompileRun(
       "function c(x) {"
@@ -2121,7 +2158,7 @@ TEST(ReleaseOverReservedPages) {
   // Triggering one GC will cause a lot of garbage to be discovered but
   // even spread across all allocated pages.
   HEAP->CollectAllGarbage(Heap::kNoGCFlags, "triggered for preparation");
-  CHECK_EQ(number_of_test_pages + 1, old_pointer_space->CountTotalPages());
+  CHECK_GE(number_of_test_pages + 1, old_pointer_space->CountTotalPages());
 
   // Triggering subsequent GCs should cause at least half of the pages
   // to be released to the OS after at most two cycles.
@@ -2157,14 +2194,9 @@ TEST(Regress2237) {
 
     // Generate a sliced string that is based on the above parent and
     // lives in old-space.
-    FillUpNewSpace(HEAP->new_space());
+    SimulateFullSpace(HEAP->new_space());
     AlwaysAllocateScope always_allocate;
-    Handle<String> t;
-    // TODO(mstarzinger): Unfortunately FillUpNewSpace() still leaves
-    // some slack, so we need to allocate a few sliced strings.
-    for (int i = 0; i < 16; i++) {
-      t = FACTORY->NewProperSubString(s, 5, 35);
-    }
+    Handle<String> t = FACTORY->NewProperSubString(s, 5, 35);
     CHECK(t->IsSlicedString());
     CHECK(!HEAP->InNewSpace(*t));
     *slice.location() = *t.location();
@@ -2427,11 +2459,7 @@ void ReleaseStackTraceDataTest(const char* source) {
     CHECK(!resource->IsDisposed());
   }
   HEAP->CollectAllAvailableGarbage();
-  // External source is being retained by the stack trace.
-  CHECK(!resource->IsDisposed());
 
-  CompileRun("error.stack;");
-  HEAP->CollectAllAvailableGarbage();
   // External source has been released.
   CHECK(resource->IsDisposed());
   delete resource;
@@ -2458,6 +2486,7 @@ TEST(ReleaseStackTraceData) {
 
 TEST(Regression144230) {
   InitializeVM();
+  Isolate* isolate = Isolate::Current();
   v8::HandleScope scope;
 
   // First make sure that the uninitialized CallIC stub is on a single page
@@ -2466,7 +2495,7 @@ TEST(Regression144230) {
     v8::HandleScope inner_scope;
     AlwaysAllocateScope always_allocate;
     SimulateFullSpace(HEAP->code_space());
-    ISOLATE->stub_cache()->ComputeCallInitialize(9, RelocInfo::CODE_TARGET);
+    isolate->stub_cache()->ComputeCallInitialize(9, RelocInfo::CODE_TARGET);
   }
 
   // Second compile a CallIC and execute it once so that it gets patched to
@@ -2495,12 +2524,12 @@ TEST(Regression144230) {
   // Fourth is the tricky part. Make sure the code containing the CallIC is
   // visited first without clearing the IC. The shared function info is then
   // visited later, causing the CallIC to be cleared.
-  Handle<String> name = FACTORY->LookupAsciiSymbol("call");
-  Handle<GlobalObject> global(ISOLATE->context()->global_object());
+  Handle<String> name = FACTORY->LookupUtf8Symbol("call");
+  Handle<GlobalObject> global(isolate->context()->global_object());
   MaybeObject* maybe_call = global->GetProperty(*name);
   JSFunction* call = JSFunction::cast(maybe_call->ToObjectChecked());
   USE(global->SetProperty(*name, Smi::FromInt(0), NONE, kNonStrictMode));
-  ISOLATE->compilation_cache()->Clear();
+  isolate->compilation_cache()->Clear();
   call->shared()->set_ic_age(HEAP->global_ic_age() + 1);
   Handle<Object> call_code(call->code());
   Handle<Object> call_function(call);
@@ -2512,4 +2541,380 @@ TEST(Regression144230) {
   // the CallIC is executed the next time.
   USE(global->SetProperty(*name, *call_function, NONE, kNonStrictMode));
   CompileRun("call();");
+}
+
+
+TEST(Regress159140) {
+  i::FLAG_allow_natives_syntax = true;
+  i::FLAG_flush_code_incrementally = true;
+  InitializeVM();
+  Isolate* isolate = Isolate::Current();
+  Heap* heap = isolate->heap();
+  v8::HandleScope scope;
+
+  // Perform one initial GC to enable code flushing.
+  heap->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
+
+  // Prepare several closures that are all eligible for code flushing
+  // because all reachable ones are not optimized. Make sure that the
+  // optimized code object is directly reachable through a handle so
+  // that it is marked black during incremental marking.
+  Handle<Code> code;
+  {
+    HandleScope inner_scope(isolate);
+    CompileRun("function h(x) {}"
+               "function mkClosure() {"
+               "  return function(x) { return x + 1; };"
+               "}"
+               "var f = mkClosure();"
+               "var g = mkClosure();"
+               "f(1); f(2);"
+               "g(1); g(2);"
+               "h(1); h(2);"
+               "%OptimizeFunctionOnNextCall(f); f(3);"
+               "%OptimizeFunctionOnNextCall(h); h(3);");
+
+    Handle<JSFunction> f =
+        v8::Utils::OpenHandle(
+            *v8::Handle<v8::Function>::Cast(
+                v8::Context::GetCurrent()->Global()->Get(v8_str("f"))));
+    CHECK(f->is_compiled());
+    CompileRun("f = null;");
+
+    Handle<JSFunction> g =
+        v8::Utils::OpenHandle(
+            *v8::Handle<v8::Function>::Cast(
+                v8::Context::GetCurrent()->Global()->Get(v8_str("g"))));
+    CHECK(g->is_compiled());
+    const int kAgingThreshold = 6;
+    for (int i = 0; i < kAgingThreshold; i++) {
+      g->code()->MakeOlder(static_cast<MarkingParity>(i % 2));
+    }
+
+    code = inner_scope.CloseAndEscape(Handle<Code>(f->code()));
+  }
+
+  // Simulate incremental marking so that the functions are enqueued as
+  // code flushing candidates. Then optimize one function. Finally
+  // finish the GC to complete code flushing.
+  SimulateIncrementalMarking();
+  CompileRun("%OptimizeFunctionOnNextCall(g); g(3);");
+  heap->CollectAllGarbage(Heap::kNoGCFlags);
+
+  // Unoptimized code is missing and the deoptimizer will go ballistic.
+  CompileRun("g('bozo');");
+}
+
+
+TEST(Regress165495) {
+  i::FLAG_allow_natives_syntax = true;
+  i::FLAG_flush_code_incrementally = true;
+  InitializeVM();
+  Isolate* isolate = Isolate::Current();
+  Heap* heap = isolate->heap();
+  v8::HandleScope scope;
+
+  // Perform one initial GC to enable code flushing.
+  heap->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
+
+  // Prepare an optimized closure that the optimized code map will get
+  // populated. Then age the unoptimized code to trigger code flushing
+  // but make sure the optimized code is unreachable.
+  {
+    HandleScope inner_scope(isolate);
+    CompileRun("function mkClosure() {"
+               "  return function(x) { return x + 1; };"
+               "}"
+               "var f = mkClosure();"
+               "f(1); f(2);"
+               "%OptimizeFunctionOnNextCall(f); f(3);");
+
+    Handle<JSFunction> f =
+        v8::Utils::OpenHandle(
+            *v8::Handle<v8::Function>::Cast(
+                v8::Context::GetCurrent()->Global()->Get(v8_str("f"))));
+    CHECK(f->is_compiled());
+    const int kAgingThreshold = 6;
+    for (int i = 0; i < kAgingThreshold; i++) {
+      f->shared()->code()->MakeOlder(static_cast<MarkingParity>(i % 2));
+    }
+
+    CompileRun("f = null;");
+  }
+
+  // Simulate incremental marking so that unoptimized code is flushed
+  // even though it still is cached in the optimized code map.
+  SimulateIncrementalMarking();
+  heap->CollectAllGarbage(Heap::kNoGCFlags);
+
+  // Make a new closure that will get code installed from the code map.
+  // Unoptimized code is missing and the deoptimizer will go ballistic.
+  CompileRun("var g = mkClosure(); g('bozo');");
+}
+
+
+TEST(Regress169209) {
+  i::FLAG_stress_compaction = false;
+  i::FLAG_allow_natives_syntax = true;
+  i::FLAG_flush_code_incrementally = true;
+  InitializeVM();
+  Isolate* isolate = Isolate::Current();
+  Heap* heap = isolate->heap();
+  v8::HandleScope scope;
+
+  // Perform one initial GC to enable code flushing.
+  heap->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
+
+  // Prepare a shared function info eligible for code flushing for which
+  // the unoptimized code will be replaced during optimization.
+  Handle<SharedFunctionInfo> shared1;
+  {
+    HandleScope inner_scope(isolate);
+    CompileRun("function f() { return 'foobar'; }"
+               "function g(x) { if (x) f(); }"
+               "f();"
+               "g(false);"
+               "g(false);");
+
+    Handle<JSFunction> f =
+        v8::Utils::OpenHandle(
+            *v8::Handle<v8::Function>::Cast(
+                v8::Context::GetCurrent()->Global()->Get(v8_str("f"))));
+    CHECK(f->is_compiled());
+    const int kAgingThreshold = 6;
+    for (int i = 0; i < kAgingThreshold; i++) {
+      f->shared()->code()->MakeOlder(static_cast<MarkingParity>(i % 2));
+    }
+
+    shared1 = inner_scope.CloseAndEscape(handle(f->shared(), isolate));
+  }
+
+  // Prepare a shared function info eligible for code flushing that will
+  // represent the dangling tail of the candidate list.
+  Handle<SharedFunctionInfo> shared2;
+  {
+    HandleScope inner_scope(isolate);
+    CompileRun("function flushMe() { return 0; }"
+               "flushMe(1);");
+
+    Handle<JSFunction> f =
+        v8::Utils::OpenHandle(
+            *v8::Handle<v8::Function>::Cast(
+                v8::Context::GetCurrent()->Global()->Get(v8_str("flushMe"))));
+    CHECK(f->is_compiled());
+    const int kAgingThreshold = 6;
+    for (int i = 0; i < kAgingThreshold; i++) {
+      f->shared()->code()->MakeOlder(static_cast<MarkingParity>(i % 2));
+    }
+
+    shared2 = inner_scope.CloseAndEscape(handle(f->shared(), isolate));
+  }
+
+  // Simulate incremental marking and collect code flushing candidates.
+  SimulateIncrementalMarking();
+  CHECK(shared1->code()->gc_metadata() != NULL);
+
+  // Optimize function and make sure the unoptimized code is replaced.
+#ifdef DEBUG
+  FLAG_stop_at = "f";
+#endif
+  CompileRun("%OptimizeFunctionOnNextCall(g);"
+             "g(false);");
+
+  // Finish garbage collection cycle.
+  heap->CollectAllGarbage(Heap::kNoGCFlags);
+  CHECK(shared1->code()->gc_metadata() == NULL);
+}
+
+
+// Helper function that simulates a fill new-space in the heap.
+static inline void AllocateAllButNBytes(v8::internal::NewSpace* space,
+                                        int extra_bytes) {
+  int space_remaining = static_cast<int>(
+      *space->allocation_limit_address() - *space->allocation_top_address());
+  CHECK(space_remaining >= extra_bytes);
+  int new_linear_size = space_remaining - extra_bytes;
+  v8::internal::MaybeObject* maybe = space->AllocateRaw(new_linear_size);
+  v8::internal::FreeListNode* node = v8::internal::FreeListNode::cast(maybe);
+  node->set_size(space->heap(), new_linear_size);
+}
+
+
+TEST(Regress169928) {
+  i::FLAG_allow_natives_syntax = true;
+  i::FLAG_crankshaft = false;
+  InitializeVM();
+  v8::HandleScope scope;
+
+  // Some flags turn Scavenge collections into Mark-sweep collections
+  // and hence are incompatible with this test case.
+  if (FLAG_gc_global || FLAG_stress_compaction) return;
+
+  // Prepare the environment
+  CompileRun("function fastliteralcase(literal, value) {"
+             "    literal[0] = value;"
+             "    return literal;"
+             "}"
+             "function get_standard_literal() {"
+             "    var literal = [1, 2, 3];"
+             "    return literal;"
+             "}"
+             "obj = fastliteralcase(get_standard_literal(), 1);"
+             "obj = fastliteralcase(get_standard_literal(), 1.5);"
+             "obj = fastliteralcase(get_standard_literal(), 2);");
+
+  // prepare the heap
+  v8::Local<v8::String> mote_code_string =
+      v8_str("fastliteralcase(mote, 2.5);");
+
+  v8::Local<v8::String> array_name = v8_str("mote");
+  v8::Context::GetCurrent()->Global()->Set(array_name, v8::Int32::New(0));
+
+  // First make sure we flip spaces
+  HEAP->CollectGarbage(NEW_SPACE);
+
+  // Allocate the object.
+  Handle<FixedArray> array_data = FACTORY->NewFixedArray(2, NOT_TENURED);
+  array_data->set(0, Smi::FromInt(1));
+  array_data->set(1, Smi::FromInt(2));
+
+  AllocateAllButNBytes(HEAP->new_space(),
+                       JSArray::kSize + AllocationSiteInfo::kSize +
+                       kPointerSize);
+
+  Handle<JSArray> array = FACTORY->NewJSArrayWithElements(array_data,
+                                                          FAST_SMI_ELEMENTS,
+                                                          NOT_TENURED);
+
+  CHECK_EQ(Smi::FromInt(2), array->length());
+  CHECK(array->HasFastSmiOrObjectElements());
+
+  // We need filler the size of AllocationSiteInfo object, plus an extra
+  // fill pointer value.
+  MaybeObject* maybe_object = HEAP->AllocateRaw(
+      AllocationSiteInfo::kSize + kPointerSize, NEW_SPACE, OLD_POINTER_SPACE);
+  Object* obj = NULL;
+  CHECK(maybe_object->ToObject(&obj));
+  Address addr_obj = reinterpret_cast<Address>(
+      reinterpret_cast<byte*>(obj - kHeapObjectTag));
+  HEAP->CreateFillerObjectAt(addr_obj,
+                             AllocationSiteInfo::kSize + kPointerSize);
+
+  // Give the array a name, making sure not to allocate strings.
+  v8::Handle<v8::Object> array_obj = v8::Utils::ToLocal(array);
+  v8::Context::GetCurrent()->Global()->Set(array_name, array_obj);
+
+  // This should crash with a protection violation if we are running a build
+  // with the bug.
+  AlwaysAllocateScope aa_scope;
+  v8::Script::Compile(mote_code_string)->Run();
+}
+
+
+TEST(Regress168801) {
+  i::FLAG_always_compact = true;
+  i::FLAG_cache_optimized_code = false;
+  i::FLAG_allow_natives_syntax = true;
+  i::FLAG_flush_code_incrementally = true;
+  InitializeVM();
+  Isolate* isolate = Isolate::Current();
+  Heap* heap = isolate->heap();
+  v8::HandleScope scope;
+
+  // Perform one initial GC to enable code flushing.
+  heap->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
+
+  // Ensure the code ends up on an evacuation candidate.
+  SimulateFullSpace(heap->code_space());
+
+  // Prepare an unoptimized function that is eligible for code flushing.
+  Handle<JSFunction> function;
+  {
+    HandleScope inner_scope(isolate);
+    CompileRun("function mkClosure() {"
+               "  return function(x) { return x + 1; };"
+               "}"
+               "var f = mkClosure();"
+               "f(1); f(2);");
+
+    Handle<JSFunction> f =
+        v8::Utils::OpenHandle(
+            *v8::Handle<v8::Function>::Cast(
+                v8::Context::GetCurrent()->Global()->Get(v8_str("f"))));
+    CHECK(f->is_compiled());
+    const int kAgingThreshold = 6;
+    for (int i = 0; i < kAgingThreshold; i++) {
+      f->shared()->code()->MakeOlder(static_cast<MarkingParity>(i % 2));
+    }
+
+    function = inner_scope.CloseAndEscape(handle(*f, isolate));
+  }
+
+  // Simulate incremental marking so that unoptimized function is enqueued as a
+  // candidate for code flushing. The shared function info however will not be
+  // explicitly enqueued.
+  SimulateIncrementalMarking();
+
+  // Now optimize the function so that it is taken off the candidate list.
+  {
+    HandleScope inner_scope(isolate);
+    CompileRun("%OptimizeFunctionOnNextCall(f); f(3);");
+  }
+
+  // This cycle will bust the heap and subsequent cycles will go ballistic.
+  heap->CollectAllGarbage(Heap::kNoGCFlags);
+  heap->CollectAllGarbage(Heap::kNoGCFlags);
+}
+
+
+TEST(Regress173458) {
+  i::FLAG_always_compact = true;
+  i::FLAG_cache_optimized_code = false;
+  i::FLAG_allow_natives_syntax = true;
+  i::FLAG_flush_code_incrementally = true;
+  InitializeVM();
+  Isolate* isolate = Isolate::Current();
+  Heap* heap = isolate->heap();
+  v8::HandleScope scope;
+
+  // Perform one initial GC to enable code flushing.
+  heap->CollectAllGarbage(Heap::kAbortIncrementalMarkingMask);
+
+  // Ensure the code ends up on an evacuation candidate.
+  SimulateFullSpace(heap->code_space());
+
+  // Prepare an unoptimized function that is eligible for code flushing.
+  Handle<JSFunction> function;
+  {
+    HandleScope inner_scope(isolate);
+    CompileRun("function mkClosure() {"
+               "  return function(x) { return x + 1; };"
+               "}"
+               "var f = mkClosure();"
+               "f(1); f(2);");
+
+    Handle<JSFunction> f =
+        v8::Utils::OpenHandle(
+            *v8::Handle<v8::Function>::Cast(
+                v8::Context::GetCurrent()->Global()->Get(v8_str("f"))));
+    CHECK(f->is_compiled());
+    const int kAgingThreshold = 6;
+    for (int i = 0; i < kAgingThreshold; i++) {
+      f->shared()->code()->MakeOlder(static_cast<MarkingParity>(i % 2));
+    }
+
+    function = inner_scope.CloseAndEscape(handle(*f, isolate));
+  }
+
+  // Simulate incremental marking so that unoptimized function is enqueued as a
+  // candidate for code flushing. The shared function info however will not be
+  // explicitly enqueued.
+  SimulateIncrementalMarking();
+
+  // Now enable the debugger which in turn will disable code flushing.
+  CHECK(isolate->debug()->Load());
+
+  // This cycle will bust the heap and subsequent cycles will go ballistic.
+  heap->CollectAllGarbage(Heap::kNoGCFlags);
+  heap->CollectAllGarbage(Heap::kNoGCFlags);
 }

@@ -5,7 +5,6 @@
 #include "v8.h"
 #include "cpu-profiler-inl.h"
 #include "cctest.h"
-#include "platform.h"
 #include "../include/v8-profiler.h"
 
 using i::CodeEntry;
@@ -21,7 +20,7 @@ using i::TokenEnumerator;
 TEST(StartStop) {
   CpuProfilesCollection profiles;
   ProfileGenerator generator(&profiles);
-  ProfilerEventsProcessor processor(&generator, NULL, 1000);
+  ProfilerEventsProcessor processor(&generator);
   processor.Start();
   processor.Stop();
   processor.Join();
@@ -39,13 +38,11 @@ static inline i::Address ToAddress(int n) {
   return reinterpret_cast<i::Address>(n);
 }
 
-static void AddTickSampleEvent(ProfilerEventsProcessor* processor,
-                               i::Address frame1,
-                               i::Address frame2 = NULL,
-                               i::Address frame3 = NULL) {
-  i::TickSample* sample;
-  i::OS::Sleep(20);
-  while ((sample = processor->StartTickSampleEvent()) == NULL) i::OS::Sleep(20);
+static void EnqueueTickSampleEvent(ProfilerEventsProcessor* proc,
+                                   i::Address frame1,
+                                   i::Address frame2 = NULL,
+                                   i::Address frame3 = NULL) {
+  i::TickSample* sample = proc->TickSampleEvent();
   sample->pc = frame1;
   sample->tos = frame1;
   sample->frames_count = 0;
@@ -57,7 +54,6 @@ static void AddTickSampleEvent(ProfilerEventsProcessor* processor,
     sample->stack[1] = frame3;
     sample->frames_count = 2;
   }
-  processor->FinishTickSampleEvent();
 }
 
 namespace {
@@ -81,21 +77,24 @@ class TestSetup {
 
 TEST(CodeEvents) {
   InitializeVM();
+  i::Isolate* isolate = i::Isolate::Current();
+  i::Heap* heap = isolate->heap();
+  i::Factory* factory = isolate->factory();
   TestSetup test_setup;
   CpuProfilesCollection profiles;
   profiles.StartProfiling("", 1);
   ProfileGenerator generator(&profiles);
-  ProfilerEventsProcessor processor(&generator, NULL, 1000);
+  ProfilerEventsProcessor processor(&generator);
   processor.Start();
 
   // Enqueue code creation events.
-  i::HandleScope scope;
+  i::HandleScope scope(isolate);
   const char* aaa_str = "aaa";
-  i::Handle<i::String> aaa_name = FACTORY->NewStringFromAscii(
+  i::Handle<i::String> aaa_name = factory->NewStringFromAscii(
       i::Vector<const char>(aaa_str, i::StrLength(aaa_str)));
   processor.CodeCreateEvent(i::Logger::FUNCTION_TAG,
                             *aaa_name,
-                            HEAP->empty_string(),
+                            heap->empty_string(),
                             0,
                             ToAddress(0x1000),
                             0x100,
@@ -112,8 +111,8 @@ TEST(CodeEvents) {
   processor.CodeMoveEvent(ToAddress(0x1400), ToAddress(0x1500));
   processor.CodeCreateEvent(i::Logger::STUB_TAG, 3, ToAddress(0x1600), 0x10);
   processor.CodeCreateEvent(i::Logger::STUB_TAG, 4, ToAddress(0x1605), 0x10);
-  // Add a tick event to enable code events processing.
-  AddTickSampleEvent(&processor, ToAddress(0x1000));
+  // Enqueue a tick event to enable code events processing.
+  EnqueueTickSampleEvent(&processor, ToAddress(0x1000));
 
   processor.Stop();
   processor.Join();
@@ -146,7 +145,7 @@ TEST(TickEvents) {
   CpuProfilesCollection profiles;
   profiles.StartProfiling("", 1);
   ProfileGenerator generator(&profiles);
-  ProfilerEventsProcessor processor(&generator, NULL, 1000);
+  ProfilerEventsProcessor processor(&generator);
   processor.Start();
 
   processor.CodeCreateEvent(i::Logger::BUILTIN_TAG,
@@ -158,12 +157,12 @@ TEST(TickEvents) {
                             "ddd",
                             ToAddress(0x1400),
                             0x80);
-  AddTickSampleEvent(&processor, ToAddress(0x1210));
-  AddTickSampleEvent(&processor, ToAddress(0x1305), ToAddress(0x1220));
-  AddTickSampleEvent(&processor,
-                     ToAddress(0x1404),
-                     ToAddress(0x1305),
-                     ToAddress(0x1230));
+  EnqueueTickSampleEvent(&processor, ToAddress(0x1210));
+  EnqueueTickSampleEvent(&processor, ToAddress(0x1305), ToAddress(0x1220));
+  EnqueueTickSampleEvent(&processor,
+                         ToAddress(0x1404),
+                         ToAddress(0x1305),
+                         ToAddress(0x1230));
 
   processor.Stop();
   processor.Join();
@@ -236,7 +235,7 @@ TEST(Issue1398) {
   CpuProfilesCollection profiles;
   profiles.StartProfiling("", 1);
   ProfileGenerator generator(&profiles);
-  ProfilerEventsProcessor processor(&generator, NULL, 1000);
+  ProfilerEventsProcessor processor(&generator);
   processor.Start();
 
   processor.CodeCreateEvent(i::Logger::BUILTIN_TAG,
@@ -244,14 +243,13 @@ TEST(Issue1398) {
                             ToAddress(0x1200),
                             0x80);
 
-  i::TickSample* sample = processor.StartTickSampleEvent();
+  i::TickSample* sample = processor.TickSampleEvent();
   sample->pc = ToAddress(0x1200);
   sample->tos = 0;
   sample->frames_count = i::TickSample::kMaxFramesCount;
   for (int i = 0; i < sample->frames_count; ++i) {
     sample->stack[i] = ToAddress(0x1200);
   }
-  processor.FinishTickSampleEvent();
 
   processor.Stop();
   processor.Join();

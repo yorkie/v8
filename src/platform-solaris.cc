@@ -191,6 +191,11 @@ void OS::Sleep(int milliseconds) {
 }
 
 
+int OS::NumberOfCores() {
+  return sysconf(_SC_NPROCESSORS_ONLN);
+}
+
+
 void OS::Abort() {
   // Redirect to std abort to signal abnormal program termination.
   abort();
@@ -199,6 +204,11 @@ void OS::Abort() {
 
 void OS::DebugBreak() {
   asm("int $3");
+}
+
+
+void OS::DumpBacktrace() {
+  // Currently unsupported.
 }
 
 
@@ -672,7 +682,7 @@ static void ProfilerSignalHandler(int signal, siginfo_t* info, void* context) {
   if (sampler == NULL || !sampler->IsActive()) return;
 
   TickSample sample_obj;
-  TickSample* sample = CpuProfiler::StartTickSampleEvent(isolate);
+  TickSample* sample = CpuProfiler::TickSampleEvent(isolate);
   if (sample == NULL) sample = &sample_obj;
 
   // Extracting the sample from the context is extremely machine dependent.
@@ -686,7 +696,6 @@ static void ProfilerSignalHandler(int signal, siginfo_t* info, void* context) {
 
   sampler->SampleStack(sample);
   sampler->Tick(sample);
-  CpuProfiler::FinishTickSampleEvent(isolate);
 }
 
 class Sampler::PlatformData : public Malloced {
@@ -702,11 +711,6 @@ class Sampler::PlatformData : public Malloced {
 
 class SignalSender : public Thread {
  public:
-  enum SleepInterval {
-    HALF_INTERVAL,
-    FULL_INTERVAL
-  };
-
   static const int kSignalSenderStackSize = 64 * KB;
 
   explicit SignalSender(int interval)
@@ -761,44 +765,16 @@ class SignalSender : public Thread {
     SamplerRegistry::State state;
     while ((state = SamplerRegistry::GetState()) !=
            SamplerRegistry::HAS_NO_SAMPLERS) {
-      bool cpu_profiling_enabled =
-          (state == SamplerRegistry::HAS_CPU_PROFILING_SAMPLERS);
-      bool runtime_profiler_enabled = RuntimeProfiler::IsEnabled();
-      if (cpu_profiling_enabled && !signal_handler_installed_) {
-        InstallSignalHandler();
-      } else if (!cpu_profiling_enabled && signal_handler_installed_) {
-        RestoreSignalHandler();
-      }
-
       // When CPU profiling is enabled both JavaScript and C++ code is
       // profiled. We must not suspend.
-      if (!cpu_profiling_enabled) {
-        if (rate_limiter_.SuspendIfNecessary()) continue;
-      }
-      if (cpu_profiling_enabled && runtime_profiler_enabled) {
-        if (!SamplerRegistry::IterateActiveSamplers(&DoCpuProfile, this)) {
-          return;
-        }
-        Sleep(HALF_INTERVAL);
-        if (!SamplerRegistry::IterateActiveSamplers(&DoRuntimeProfile, NULL)) {
-          return;
-        }
-        Sleep(HALF_INTERVAL);
+      if (state == SamplerRegistry::HAS_CPU_PROFILING_SAMPLERS) {
+        if (!signal_handler_installed_) InstallSignalHandler();
+        SamplerRegistry::IterateActiveSamplers(&DoCpuProfile, this);
       } else {
-        if (cpu_profiling_enabled) {
-          if (!SamplerRegistry::IterateActiveSamplers(&DoCpuProfile,
-                                                      this)) {
-            return;
-          }
-        }
-        if (runtime_profiler_enabled) {
-          if (!SamplerRegistry::IterateActiveSamplers(&DoRuntimeProfile,
-                                                      NULL)) {
-            return;
-          }
-        }
-        Sleep(FULL_INTERVAL);
+        if (signal_handler_installed_) RestoreSignalHandler();
+        if (RuntimeProfiler::WaitForSomeIsolateToEnterJS()) continue;
       }
+      Sleep();  // TODO(svenpanne) Figure out if OS:Sleep(interval_) is enough.
     }
   }
 
@@ -808,21 +784,15 @@ class SignalSender : public Thread {
     sender->SendProfilingSignal(sampler->platform_data()->vm_tid());
   }
 
-  static void DoRuntimeProfile(Sampler* sampler, void* ignored) {
-    if (!sampler->isolate()->IsInitialized()) return;
-    sampler->isolate()->runtime_profiler()->NotifyTick();
-  }
-
   void SendProfilingSignal(pthread_t tid) {
     if (!signal_handler_installed_) return;
     pthread_kill(tid, SIGPROF);
   }
 
-  void Sleep(SleepInterval full_or_half) {
+  void Sleep() {
     // Convert ms to us and subtract 100 us to compensate delays
     // occuring during signal delivery.
     useconds_t interval = interval_ * 1000 - 100;
-    if (full_or_half == HALF_INTERVAL) interval /= 2;
     int result = usleep(interval);
 #ifdef DEBUG
     if (result != 0 && errno != EINTR) {
@@ -837,7 +807,6 @@ class SignalSender : public Thread {
   }
 
   const int interval_;
-  RuntimeProfilerRateLimiter rate_limiter_;
 
   // Protects the process wide state below.
   static Mutex* mutex_;
@@ -890,11 +859,6 @@ Sampler::~Sampler() {
 }
 
 
-void Sampler::DoSample() {
-  // TODO(rogulenko): implement
-}
-
-
 void Sampler::Start() {
   ASSERT(!IsActive());
   SetActive(true);
@@ -907,14 +871,5 @@ void Sampler::Stop() {
   SignalSender::RemoveActiveSampler(this);
   SetActive(false);
 }
-
-
-void Sampler::StartSampling() {
-}
-
-
-void Sampler::StopSampling() {
-}
-
 
 } }  // namespace v8::internal

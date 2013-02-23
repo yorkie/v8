@@ -78,7 +78,7 @@ void IncrementalMarking::RecordWriteSlow(HeapObject* obj,
 
 
 void IncrementalMarking::RecordWriteFromCode(HeapObject* obj,
-                                             Object* value,
+                                             Object** slot,
                                              Isolate* isolate) {
   ASSERT(obj->IsHeapObject());
   IncrementalMarking* marking = isolate->heap()->incremental_marking();
@@ -94,7 +94,7 @@ void IncrementalMarking::RecordWriteFromCode(HeapObject* obj,
         MemoryChunk::kWriteBarrierCounterGranularity);
   }
 
-  marking->RecordWrite(obj, NULL, value);
+  marking->RecordWrite(obj, slot, *slot);
 }
 
 
@@ -338,10 +338,9 @@ class IncrementalMarkingMarkingVisitor
 
 class IncrementalMarkingRootMarkingVisitor : public ObjectVisitor {
  public:
-  IncrementalMarkingRootMarkingVisitor(Heap* heap,
-                                       IncrementalMarking* incremental_marking)
-      : heap_(heap),
-        incremental_marking_(incremental_marking) {
+  explicit IncrementalMarkingRootMarkingVisitor(
+      IncrementalMarking* incremental_marking)
+      : incremental_marking_(incremental_marking) {
   }
 
   void VisitPointer(Object** p) {
@@ -368,7 +367,6 @@ class IncrementalMarkingRootMarkingVisitor : public ObjectVisitor {
     }
   }
 
-  Heap* heap_;
   IncrementalMarking* incremental_marking_;
 };
 
@@ -564,6 +562,7 @@ void IncrementalMarking::UncommitMarkingDeque() {
 
 
 void IncrementalMarking::Start() {
+  ASSERT(!heap_->mark_compact_collector()->IsConcurrentSweepingInProgress());
   if (FLAG_trace_incremental_marking) {
     PrintF("[IncrementalMarking] Start\n");
   }
@@ -572,8 +571,7 @@ void IncrementalMarking::Start() {
 
   ResetStepCounters();
 
-  if (heap_->old_pointer_space()->IsSweepingComplete() &&
-      heap_->old_data_space()->IsSweepingComplete()) {
+  if (heap_->IsSweepingComplete()) {
     StartMarking(ALLOW_COMPACTION);
   } else {
     if (FLAG_trace_incremental_marking) {
@@ -629,7 +627,7 @@ void IncrementalMarking::StartMarking(CompactionFlag flag) {
   }
 
   // Mark strong roots grey.
-  IncrementalMarkingRootMarkingVisitor visitor(heap_, this);
+  IncrementalMarkingRootMarkingVisitor visitor(this);
   heap_->IterateStrongRoots(&visitor, VISIT_ONLY_STRONG);
 
   // Ready to start incremental marking.
@@ -756,18 +754,24 @@ void IncrementalMarking::ProcessMarkingDeque() {
 void IncrementalMarking::Hurry() {
   if (state() == MARKING) {
     double start = 0.0;
-    if (FLAG_trace_incremental_marking) {
-      PrintF("[IncrementalMarking] Hurry\n");
+    if (FLAG_trace_incremental_marking || FLAG_print_cumulative_gc_stat) {
       start = OS::TimeCurrentMillis();
+      if (FLAG_trace_incremental_marking) {
+        PrintF("[IncrementalMarking] Hurry\n");
+      }
     }
     // TODO(gc) hurry can mark objects it encounters black as mutator
     // was stopped.
     ProcessMarkingDeque();
     state_ = COMPLETE;
-    if (FLAG_trace_incremental_marking) {
+    if (FLAG_trace_incremental_marking || FLAG_print_cumulative_gc_stat) {
       double end = OS::TimeCurrentMillis();
-      PrintF("[IncrementalMarking] Complete (hurry), spent %d ms.\n",
-             static_cast<int>(end - start));
+      double delta = end - start;
+      heap_->AddMarkingTime(delta);
+      if (FLAG_trace_incremental_marking) {
+        PrintF("[IncrementalMarking] Complete (hurry), spent %d ms.\n",
+               static_cast<int>(delta));
+      }
     }
   }
 
@@ -883,7 +887,7 @@ void IncrementalMarking::Step(intptr_t allocated_bytes,
   // allocation), so to reduce the lumpiness we don't use the write barriers
   // invoked since last step directly to determine the amount of work to do.
   intptr_t bytes_to_process =
-      marking_speed_ * Max(allocated_, kWriteBarriersInvokedThreshold);
+      marking_speed_ * Max(allocated_, write_barriers_invoked_since_last_step_);
   allocated_ = 0;
   write_barriers_invoked_since_last_step_ = 0;
 
@@ -891,7 +895,8 @@ void IncrementalMarking::Step(intptr_t allocated_bytes,
 
   double start = 0;
 
-  if (FLAG_trace_incremental_marking || FLAG_trace_gc) {
+  if (FLAG_trace_incremental_marking || FLAG_trace_gc ||
+      FLAG_print_cumulative_gc_stat) {
     start = OS::TimeCurrentMillis();
   }
 
@@ -971,12 +976,14 @@ void IncrementalMarking::Step(intptr_t allocated_bytes,
     }
   }
 
-  if (FLAG_trace_incremental_marking || FLAG_trace_gc) {
+  if (FLAG_trace_incremental_marking || FLAG_trace_gc ||
+      FLAG_print_cumulative_gc_stat) {
     double end = OS::TimeCurrentMillis();
     double delta = (end - start);
     longest_step_ = Max(longest_step_, delta);
     steps_took_ += delta;
     steps_took_since_last_gc_ += delta;
+    heap_->AddMarkingTime(delta);
   }
 }
 

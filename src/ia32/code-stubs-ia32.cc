@@ -34,11 +34,35 @@
 #include "isolate.h"
 #include "jsregexp.h"
 #include "regexp-macro-assembler.h"
+#include "runtime.h"
 #include "stub-cache.h"
 #include "codegen.h"
 
 namespace v8 {
 namespace internal {
+
+
+void KeyedLoadFastElementStub::InitializeInterfaceDescriptor(
+    Isolate* isolate,
+    CodeStubInterfaceDescriptor* descriptor) {
+  static Register registers[] = { edx, ecx };
+  descriptor->register_param_count_ = 2;
+  descriptor->register_params_ = registers;
+  descriptor->deoptimization_handler_ =
+      FUNCTION_ADDR(KeyedLoadIC_MissFromStubFailure);
+}
+
+
+void TransitionElementsKindStub::InitializeInterfaceDescriptor(
+    Isolate* isolate,
+    CodeStubInterfaceDescriptor* descriptor) {
+  static Register registers[] = { eax, ebx };
+  descriptor->register_param_count_ = 2;
+  descriptor->register_params_ = registers;
+  descriptor->deoptimization_handler_ =
+      Runtime::FunctionForId(Runtime::kTransitionElementsKind)->entry;
+}
+
 
 #define __ ACCESS_MASM(masm)
 
@@ -311,6 +335,7 @@ static void GenerateFastCloneShallowArrayCommon(
     MacroAssembler* masm,
     int length,
     FastCloneShallowArrayStub::Mode mode,
+    AllocationSiteMode allocation_site_mode,
     Label* fail) {
   // Registers on entry:
   //
@@ -324,11 +349,27 @@ static void GenerateFastCloneShallowArrayCommon(
         ? FixedDoubleArray::SizeFor(length)
         : FixedArray::SizeFor(length);
   }
-  int size = JSArray::kSize + elements_size;
+  int size = JSArray::kSize;
+  int allocation_info_start = size;
+  if (allocation_site_mode == TRACK_ALLOCATION_SITE) {
+    size += AllocationSiteInfo::kSize;
+  }
+  size += elements_size;
 
   // Allocate both the JS array and the elements array in one big
   // allocation. This avoids multiple limit checks.
-  __ AllocateInNewSpace(size, eax, ebx, edx, fail, TAG_OBJECT);
+  AllocationFlags flags = TAG_OBJECT;
+  if (mode == FastCloneShallowArrayStub::CLONE_DOUBLE_ELEMENTS) {
+    flags = static_cast<AllocationFlags>(DOUBLE_ALIGNMENT | flags);
+  }
+  __ AllocateInNewSpace(size, eax, ebx, edx, fail, flags);
+
+  if (allocation_site_mode == TRACK_ALLOCATION_SITE) {
+    __ mov(FieldOperand(eax, allocation_info_start),
+           Immediate(Handle<Map>(masm->isolate()->heap()->
+                                 allocation_site_info_map())));
+    __ mov(FieldOperand(eax, allocation_info_start + kPointerSize), ecx);
+  }
 
   // Copy the JS array part.
   for (int i = 0; i < JSArray::kSize; i += kPointerSize) {
@@ -342,7 +383,11 @@ static void GenerateFastCloneShallowArrayCommon(
     // Get hold of the elements array of the boilerplate and setup the
     // elements pointer in the resulting object.
     __ mov(ecx, FieldOperand(ecx, JSArray::kElementsOffset));
-    __ lea(edx, Operand(eax, JSArray::kSize));
+    if (allocation_site_mode == TRACK_ALLOCATION_SITE) {
+      __ lea(edx, Operand(eax, JSArray::kSize + AllocationSiteInfo::kSize));
+    } else {
+      __ lea(edx, Operand(eax, JSArray::kSize));
+    }
     __ mov(FieldOperand(eax, JSArray::kElementsOffset), edx);
 
     // Copy the elements array.
@@ -397,15 +442,17 @@ void FastCloneShallowArrayStub::Generate(MacroAssembler* masm) {
     __ mov(ebx, FieldOperand(ecx, JSArray::kElementsOffset));
     __ CheckMap(ebx, factory->fixed_cow_array_map(),
                 &check_fast_elements, DONT_DO_SMI_CHECK);
-    GenerateFastCloneShallowArrayCommon(masm, 0,
-                                        COPY_ON_WRITE_ELEMENTS, &slow_case);
+    GenerateFastCloneShallowArrayCommon(masm, 0, COPY_ON_WRITE_ELEMENTS,
+                                        allocation_site_mode_,
+                                        &slow_case);
     __ ret(3 * kPointerSize);
 
     __ bind(&check_fast_elements);
     __ CheckMap(ebx, factory->fixed_array_map(),
                 &double_elements, DONT_DO_SMI_CHECK);
-    GenerateFastCloneShallowArrayCommon(masm, length_,
-                                        CLONE_ELEMENTS, &slow_case);
+    GenerateFastCloneShallowArrayCommon(masm, length_, CLONE_ELEMENTS,
+                                        allocation_site_mode_,
+                                        &slow_case);
     __ ret(3 * kPointerSize);
 
     __ bind(&double_elements);
@@ -434,7 +481,10 @@ void FastCloneShallowArrayStub::Generate(MacroAssembler* masm) {
     __ pop(ecx);
   }
 
-  GenerateFastCloneShallowArrayCommon(masm, length_, mode, &slow_case);
+  GenerateFastCloneShallowArrayCommon(masm, length_, mode,
+                                      allocation_site_mode_,
+                                      &slow_case);
+
   // Return and remove the on-stack parameters.
   __ ret(3 * kPointerSize);
 
@@ -696,24 +746,13 @@ class FloatingPointHelper : public AllStatic {
                                  Label* non_float,
                                  Register scratch);
 
-  // Checks that the two floating point numbers on top of the FPU stack
-  // have int32 values.
-  static void CheckFloatOperandsAreInt32(MacroAssembler* masm,
-                                         Label* non_int32);
-
   // Takes the operands in edx and eax and loads them as integers in eax
   // and ecx.
   static void LoadUnknownsAsIntegers(MacroAssembler* masm,
                                      bool use_sse3,
+                                     BinaryOpIC::TypeInfo left_type,
+                                     BinaryOpIC::TypeInfo right_type,
                                      Label* operand_conversion_failure);
-
-  // Must only be called after LoadUnknownsAsIntegers.  Assumes that the
-  // operands are pushed on the stack, and that their conversions to int32
-  // are in eax and ecx.  Checks that the original numbers were in the int32
-  // range.
-  static void CheckLoadedIntegersWereInt32(MacroAssembler* masm,
-                                           bool use_sse3,
-                                           Label* not_int32);
 
   // Assumes that operands are smis or heap numbers and loads them
   // into xmm0 and xmm1. Operands are in edx and eax.
@@ -736,9 +775,12 @@ class FloatingPointHelper : public AllStatic {
                                         Label* non_int32,
                                         Register scratch);
 
+  // Checks that |operand| has an int32 value. If |int32_result| is different
+  // from |scratch|, it will contain that int32 value.
   static void CheckSSE2OperandIsInt32(MacroAssembler* masm,
                                       Label* non_int32,
                                       XMMRegister operand,
+                                      Register int32_result,
                                       Register scratch,
                                       XMMRegister xmm_scratch);
 };
@@ -869,6 +911,18 @@ static void IntegerConvert(MacroAssembler* masm,
     __ sub(ecx, scratch2);
   }
   __ bind(&done);
+}
+
+
+// Uses SSE2 to convert the heap number in |source| to an integer. Jumps to
+// |conversion_failure| if the heap number did not contain an int32 value.
+// Result is in ecx. Trashes ebx, xmm0, and xmm1.
+static void ConvertHeapNumberToInt32(MacroAssembler* masm,
+                                     Register source,
+                                     Label* conversion_failure) {
+  __ movdbl(xmm0, FieldOperand(source, HeapNumber::kValueOffset));
+  FloatingPointHelper::CheckSSE2OperandIsInt32(
+      masm, conversion_failure, xmm0, ecx, ebx, xmm1);
 }
 
 
@@ -1745,12 +1799,8 @@ void BinaryOpStub::GenerateInt32Stub(MacroAssembler* masm) {
           }
           // Check result type if it is currently Int32.
           if (result_type_ <= BinaryOpIC::INT32) {
-            __ cvttsd2si(ecx, Operand(xmm0));
-            __ cvtsi2sd(xmm2, ecx);
-            __ pcmpeqd(xmm2, xmm0);
-            __ movmskpd(ecx, xmm2);
-            __ test(ecx, Immediate(1));
-            __ j(zero, &not_int32);
+            FloatingPointHelper::CheckSSE2OperandIsInt32(
+                masm, &not_int32, xmm0, ecx, ecx, xmm2);
           }
           BinaryOpStub_GenerateHeapResultAllocation(masm, &call_runtime, mode_);
           __ movdbl(FieldOperand(eax, HeapNumber::kValueOffset), xmm0);
@@ -1762,7 +1812,6 @@ void BinaryOpStub::GenerateInt32Stub(MacroAssembler* masm) {
             masm,
             ecx,
             FloatingPointHelper::ARGS_IN_REGISTERS);
-        FloatingPointHelper::CheckFloatOperandsAreInt32(masm, &not_int32);
         if (op_ == Token::MOD) {
           // The operands are now on the FPU stack, but we don't need them.
           __ fstp(0);
@@ -1804,15 +1853,9 @@ void BinaryOpStub::GenerateInt32Stub(MacroAssembler* masm) {
       Label not_floats;
       Label not_int32;
       Label non_smi_result;
-      // We do not check the input arguments here, as any value is
-      // unconditionally truncated to an int32 anyway. To get the
-      // right optimized code, int32 type feedback is just right.
       bool use_sse3 = platform_specific_bit_;
-      FloatingPointHelper::LoadUnknownsAsIntegers(masm,
-                                                  use_sse3,
-                                                  &not_floats);
-      FloatingPointHelper::CheckLoadedIntegersWereInt32(masm, use_sse3,
-                                                        &not_int32);
+      FloatingPointHelper::LoadUnknownsAsIntegers(
+          masm, use_sse3, left_type_, right_type_, &not_floats);
       switch (op_) {
         case Token::BIT_OR:  __ or_(eax, ecx); break;
         case Token::BIT_AND: __ and_(eax, ecx); break;
@@ -1966,11 +2009,11 @@ void BinaryOpStub::GenerateHeapNumberStub(MacroAssembler* masm) {
         FloatingPointHelper::LoadSSE2Operands(masm, &not_floats);
         if (left_type_ == BinaryOpIC::INT32) {
           FloatingPointHelper::CheckSSE2OperandIsInt32(
-              masm, &not_floats, xmm0, ecx, xmm2);
+              masm, &not_floats, xmm0, ecx, ecx, xmm2);
         }
         if (right_type_ == BinaryOpIC::INT32) {
           FloatingPointHelper::CheckSSE2OperandIsInt32(
-              masm, &not_floats, xmm1, ecx, xmm2);
+              masm, &not_floats, xmm1, ecx, ecx, xmm2);
         }
 
         switch (op_) {
@@ -2028,9 +2071,8 @@ void BinaryOpStub::GenerateHeapNumberStub(MacroAssembler* masm) {
       // unconditionally truncated to an int32 anyway. To get the
       // right optimized code, int32 type feedback is just right.
       bool use_sse3 = platform_specific_bit_;
-      FloatingPointHelper::LoadUnknownsAsIntegers(masm,
-                                                  use_sse3,
-                                                  &not_floats);
+      FloatingPointHelper::LoadUnknownsAsIntegers(
+                masm, use_sse3, left_type_, right_type_, &not_floats);
       switch (op_) {
         case Token::BIT_OR:  __ or_(eax, ecx); break;
         case Token::BIT_AND: __ and_(eax, ecx); break;
@@ -2209,6 +2251,8 @@ void BinaryOpStub::GenerateGeneric(MacroAssembler* masm) {
       bool use_sse3 = platform_specific_bit_;
       FloatingPointHelper::LoadUnknownsAsIntegers(masm,
                                                   use_sse3,
+                                                  BinaryOpIC::GENERIC,
+                                                  BinaryOpIC::GENERIC,
                                                   &call_runtime);
       switch (op_) {
         case Token::BIT_OR:  __ or_(eax, ecx); break;
@@ -2426,6 +2470,7 @@ void TranscendentalCacheStub::Generate(MacroAssembler* masm) {
 
     __ bind(&loaded);
   } else {  // UNTAGGED.
+    CpuFeatures::Scope scope(SSE2);
     if (CpuFeatures::IsSupported(SSE4_1)) {
       CpuFeatures::Scope sse4_scope(SSE4_1);
       __ pextrd(edx, xmm1, 0x1);  // copy xmm1[63..32] to edx.
@@ -2498,6 +2543,7 @@ void TranscendentalCacheStub::Generate(MacroAssembler* masm) {
     __ fstp(0);
     __ ret(kPointerSize);
   } else {  // UNTAGGED.
+    CpuFeatures::Scope scope(SSE2);
     __ movdbl(xmm1, FieldOperand(eax, HeapNumber::kValueOffset));
     __ Ret();
   }
@@ -2510,6 +2556,7 @@ void TranscendentalCacheStub::Generate(MacroAssembler* masm) {
   if (tagged) {
     __ AllocateHeapNumber(eax, edi, no_reg, &runtime_call_clear_stack);
   } else {  // UNTAGGED.
+    CpuFeatures::Scope scope(SSE2);
     __ AllocateHeapNumber(eax, edi, no_reg, &skip_cache);
     __ sub(esp, Immediate(kDoubleSize));
     __ movdbl(Operand(esp, 0), xmm1);
@@ -2524,6 +2571,7 @@ void TranscendentalCacheStub::Generate(MacroAssembler* masm) {
   if (tagged) {
     __ ret(kPointerSize);
   } else {  // UNTAGGED.
+    CpuFeatures::Scope scope(SSE2);
     __ movdbl(xmm1, FieldOperand(eax, HeapNumber::kValueOffset));
     __ Ret();
 
@@ -2556,6 +2604,7 @@ void TranscendentalCacheStub::Generate(MacroAssembler* masm) {
         ExternalReference(RuntimeFunction(), masm->isolate());
     __ TailCallExternalReference(runtime, 1, 1);
   } else {  // UNTAGGED.
+    CpuFeatures::Scope scope(SSE2);
     __ bind(&runtime_call_clear_stack);
     __ bind(&runtime_call);
     __ AllocateHeapNumber(eax, edi, no_reg, &skip_cache);
@@ -2684,16 +2733,24 @@ void TranscendentalCacheStub::GenerateOperation(
 
 // Input: edx, eax are the left and right objects of a bit op.
 // Output: eax, ecx are left and right integers for a bit op.
-void FloatingPointHelper::LoadUnknownsAsIntegers(MacroAssembler* masm,
-                                                 bool use_sse3,
-                                                 Label* conversion_failure) {
+// Warning: can clobber inputs even when it jumps to |conversion_failure|!
+void FloatingPointHelper::LoadUnknownsAsIntegers(
+    MacroAssembler* masm,
+    bool use_sse3,
+    BinaryOpIC::TypeInfo left_type,
+    BinaryOpIC::TypeInfo right_type,
+    Label* conversion_failure) {
   // Check float operands.
   Label arg1_is_object, check_undefined_arg1;
   Label arg2_is_object, check_undefined_arg2;
   Label load_arg2, done;
 
   // Test if arg1 is a Smi.
-  __ JumpIfNotSmi(edx, &arg1_is_object, Label::kNear);
+  if (left_type == BinaryOpIC::SMI) {
+    __ JumpIfNotSmi(edx, conversion_failure);
+  } else {
+    __ JumpIfNotSmi(edx, &arg1_is_object, Label::kNear);
+  }
 
   __ SmiUntag(edx);
   __ jmp(&load_arg2);
@@ -2712,14 +2769,23 @@ void FloatingPointHelper::LoadUnknownsAsIntegers(MacroAssembler* masm,
   __ j(not_equal, &check_undefined_arg1);
 
   // Get the untagged integer version of the edx heap number in ecx.
-  IntegerConvert(masm, edx, use_sse3, conversion_failure);
+  if (left_type == BinaryOpIC::INT32 && CpuFeatures::IsSupported(SSE2)) {
+    CpuFeatures::Scope use_sse2(SSE2);
+    ConvertHeapNumberToInt32(masm, edx, conversion_failure);
+  } else {
+    IntegerConvert(masm, edx, use_sse3, conversion_failure);
+  }
   __ mov(edx, ecx);
 
   // Here edx has the untagged integer, eax has a Smi or a heap number.
   __ bind(&load_arg2);
 
   // Test if arg2 is a Smi.
-  __ JumpIfNotSmi(eax, &arg2_is_object, Label::kNear);
+  if (right_type == BinaryOpIC::SMI) {
+    __ JumpIfNotSmi(eax, conversion_failure);
+  } else {
+    __ JumpIfNotSmi(eax, &arg2_is_object, Label::kNear);
+  }
 
   __ SmiUntag(eax);
   __ mov(ecx, eax);
@@ -2736,18 +2802,17 @@ void FloatingPointHelper::LoadUnknownsAsIntegers(MacroAssembler* masm,
   __ mov(ebx, FieldOperand(eax, HeapObject::kMapOffset));
   __ cmp(ebx, factory->heap_number_map());
   __ j(not_equal, &check_undefined_arg2);
-
   // Get the untagged integer version of the eax heap number in ecx.
-  IntegerConvert(masm, eax, use_sse3, conversion_failure);
+
+  if (right_type == BinaryOpIC::INT32 && CpuFeatures::IsSupported(SSE2)) {
+    CpuFeatures::Scope use_sse2(SSE2);
+    ConvertHeapNumberToInt32(masm, eax, conversion_failure);
+  } else {
+    IntegerConvert(masm, eax, use_sse3, conversion_failure);
+  }
+
   __ bind(&done);
   __ mov(eax, edx);
-}
-
-
-void FloatingPointHelper::CheckLoadedIntegersWereInt32(MacroAssembler* masm,
-                                                       bool use_sse3,
-                                                       Label* not_int32) {
-  return;
 }
 
 
@@ -2845,22 +2910,25 @@ void FloatingPointHelper::LoadSSE2Smis(MacroAssembler* masm,
 void FloatingPointHelper::CheckSSE2OperandsAreInt32(MacroAssembler* masm,
                                                     Label* non_int32,
                                                     Register scratch) {
-  CheckSSE2OperandIsInt32(masm, non_int32, xmm0, scratch, xmm2);
-  CheckSSE2OperandIsInt32(masm, non_int32, xmm1, scratch, xmm2);
+  CheckSSE2OperandIsInt32(masm, non_int32, xmm0, scratch, scratch, xmm2);
+  CheckSSE2OperandIsInt32(masm, non_int32, xmm1, scratch, scratch, xmm2);
 }
 
 
 void FloatingPointHelper::CheckSSE2OperandIsInt32(MacroAssembler* masm,
                                                   Label* non_int32,
                                                   XMMRegister operand,
+                                                  Register int32_result,
                                                   Register scratch,
                                                   XMMRegister xmm_scratch) {
-  __ cvttsd2si(scratch, Operand(operand));
-  __ cvtsi2sd(xmm_scratch, scratch);
+  __ cvttsd2si(int32_result, Operand(operand));
+  __ cvtsi2sd(xmm_scratch, int32_result);
   __ pcmpeqd(xmm_scratch, operand);
-  __ movmskpd(scratch, xmm_scratch);
-  __ test(scratch, Immediate(1));
-  __ j(zero, non_int32);
+  __ movmskps(scratch, xmm_scratch);
+  // Two least significant bits should be both set.
+  __ not_(scratch);
+  __ test(scratch, Immediate(3));
+  __ j(not_zero, non_int32);
 }
 
 
@@ -2941,12 +3009,6 @@ void FloatingPointHelper::CheckFloatOperands(MacroAssembler* masm,
 
   // Fall-through: Both operands are numbers.
   __ bind(&done);
-}
-
-
-void FloatingPointHelper::CheckFloatOperandsAreInt32(MacroAssembler* masm,
-                                                     Label* non_int32) {
-  return;
 }
 
 
@@ -3115,10 +3177,10 @@ void MathPowStub::Generate(MacroAssembler* masm) {
     // F2XM1 calculates 2^st(0) - 1 for -1 < st(0) < 1
     __ f2xm1();    // 2^(X-rnd(X)) - 1, rnd(X)
     __ fld1();     // 1, 2^(X-rnd(X)) - 1, rnd(X)
-    __ faddp(1);   // 1, 2^(X-rnd(X)), rnd(X)
+    __ faddp(1);   // 2^(X-rnd(X)), rnd(X)
     // FSCALE calculates st(0) * 2^st(1)
     __ fscale();   // 2^X, rnd(X)
-    __ fstp(1);
+    __ fstp(1);    // 2^X
     // Bail out to runtime in case of exceptions in the status word.
     __ fnstsw_ax();
     __ test_b(eax, 0x5F);  // We check for all but precision exception.
@@ -3215,6 +3277,128 @@ void MathPowStub::Generate(MacroAssembler* masm) {
     __ IncrementCounter(counters->math_pow(), 1);
     __ ret(0);
   }
+}
+
+
+void ArrayLengthStub::Generate(MacroAssembler* masm) {
+  // ----------- S t a t e -------------
+  //  -- ecx    : name
+  //  -- edx    : receiver
+  //  -- esp[0] : return address
+  // -----------------------------------
+  Label miss;
+
+  if (kind() == Code::KEYED_LOAD_IC) {
+    __ cmp(ecx, Immediate(masm->isolate()->factory()->length_symbol()));
+    __ j(not_equal, &miss);
+  }
+
+  StubCompiler::GenerateLoadArrayLength(masm, edx, eax, &miss);
+  __ bind(&miss);
+  StubCompiler::GenerateLoadMiss(masm, kind());
+}
+
+
+void FunctionPrototypeStub::Generate(MacroAssembler* masm) {
+  // ----------- S t a t e -------------
+  //  -- ecx    : name
+  //  -- edx    : receiver
+  //  -- esp[0] : return address
+  // -----------------------------------
+  Label miss;
+
+  if (kind() == Code::KEYED_LOAD_IC) {
+    __ cmp(ecx, Immediate(masm->isolate()->factory()->prototype_symbol()));
+    __ j(not_equal, &miss);
+  }
+
+  StubCompiler::GenerateLoadFunctionPrototype(masm, edx, eax, ebx, &miss);
+  __ bind(&miss);
+  StubCompiler::GenerateLoadMiss(masm, kind());
+}
+
+
+void StringLengthStub::Generate(MacroAssembler* masm) {
+  // ----------- S t a t e -------------
+  //  -- ecx    : name
+  //  -- edx    : receiver
+  //  -- esp[0] : return address
+  // -----------------------------------
+  Label miss;
+
+  if (kind() == Code::KEYED_LOAD_IC) {
+    __ cmp(ecx, Immediate(masm->isolate()->factory()->length_symbol()));
+    __ j(not_equal, &miss);
+  }
+
+  StubCompiler::GenerateLoadStringLength(masm, edx, eax, ebx, &miss,
+                                         support_wrapper_);
+  __ bind(&miss);
+  StubCompiler::GenerateLoadMiss(masm, kind());
+}
+
+
+void StoreArrayLengthStub::Generate(MacroAssembler* masm) {
+  // ----------- S t a t e -------------
+  //  -- eax    : value
+  //  -- ecx    : name
+  //  -- edx    : receiver
+  //  -- esp[0] : return address
+  // -----------------------------------
+  //
+  // This accepts as a receiver anything JSArray::SetElementsLength accepts
+  // (currently anything except for external arrays which means anything with
+  // elements of FixedArray type).  Value must be a number, but only smis are
+  // accepted as the most common case.
+
+  Label miss;
+
+  Register receiver = edx;
+  Register value = eax;
+  Register scratch = ebx;
+
+  if (kind() == Code::KEYED_LOAD_IC) {
+    __ cmp(ecx, Immediate(masm->isolate()->factory()->length_symbol()));
+    __ j(not_equal, &miss);
+  }
+
+  // Check that the receiver isn't a smi.
+  __ JumpIfSmi(receiver, &miss);
+
+  // Check that the object is a JS array.
+  __ CmpObjectType(receiver, JS_ARRAY_TYPE, scratch);
+  __ j(not_equal, &miss);
+
+  // Check that elements are FixedArray.
+  // We rely on StoreIC_ArrayLength below to deal with all types of
+  // fast elements (including COW).
+  __ mov(scratch, FieldOperand(receiver, JSArray::kElementsOffset));
+  __ CmpObjectType(scratch, FIXED_ARRAY_TYPE, scratch);
+  __ j(not_equal, &miss);
+
+  // Check that the array has fast properties, otherwise the length
+  // property might have been redefined.
+  __ mov(scratch, FieldOperand(receiver, JSArray::kPropertiesOffset));
+  __ CompareRoot(FieldOperand(scratch, FixedArray::kMapOffset),
+                 Heap::kHashTableMapRootIndex);
+  __ j(equal, &miss);
+
+  // Check that value is a smi.
+  __ JumpIfNotSmi(value, &miss);
+
+  // Prepare tail call to StoreIC_ArrayLength.
+  __ pop(scratch);
+  __ push(receiver);
+  __ push(value);
+  __ push(scratch);  // return address
+
+  ExternalReference ref =
+      ExternalReference(IC_Utility(IC::kStoreIC_ArrayLength), masm->isolate());
+  __ TailCallExternalReference(ref, 2, 1);
+
+  __ bind(&miss);
+
+  StubCompiler::GenerateStoreMiss(masm, kind());
 }
 
 
@@ -4065,8 +4249,9 @@ void RegExpConstructResultStub::Generate(MacroAssembler* masm) {
   // JSArray:   [Map][empty properties][Elements][Length-smi][index][input]
   // Elements:  [Map][Length][..elements..]
   __ AllocateInNewSpace(JSRegExpResult::kSize + FixedArray::kHeaderSize,
-                        times_half_pointer_size,
-                        ebx,  // In: Number of elements (times 2, being a smi)
+                        times_pointer_size,
+                        ebx,  // In: Number of elements as a smi
+                        REGISTER_VALUE_IS_SMI,
                         eax,  // Out: Start of allocation (tagged).
                         ecx,  // Out: End of allocation.
                         edx,  // Scratch register
@@ -4808,10 +4993,17 @@ void CodeStub::GenerateStubsAheadOfTime() {
 
 
 void CodeStub::GenerateFPStubs() {
-  CEntryStub save_doubles(1, kSaveFPRegs);
-  Handle<Code> code = save_doubles.GetCode();
-  code->set_is_pregenerated(true);
-  code->GetIsolate()->set_fp_stubs_generated(true);
+  if (CpuFeatures::IsSupported(SSE2)) {
+    CEntryStub save_doubles(1, kSaveFPRegs);
+    // Stubs might already be in the snapshot, detect that and don't regenerate,
+    // which would lead to code stub initialization state being messed up.
+    Code* save_doubles_code;
+    if (!save_doubles.FindCodeInCache(&save_doubles_code, ISOLATE)) {
+      save_doubles_code = *(save_doubles.GetCode());
+    }
+    save_doubles_code->set_is_pregenerated(true);
+    save_doubles_code->GetIsolate()->set_fp_stubs_generated(true);
+  }
 }
 
 
@@ -4819,6 +5011,19 @@ void CEntryStub::GenerateAheadOfTime() {
   CEntryStub stub(1, kDontSaveFPRegs);
   Handle<Code> code = stub.GetCode();
   code->set_is_pregenerated(true);
+}
+
+
+static void JumpIfOOM(MacroAssembler* masm,
+                      Register value,
+                      Register scratch,
+                      Label* oom_label) {
+  __ mov(scratch, value);
+  STATIC_ASSERT(Failure::OUT_OF_MEMORY_EXCEPTION == 3);
+  STATIC_ASSERT(kFailureTag == 3);
+  __ and_(scratch, 0xf);
+  __ cmp(scratch, 0xf);
+  __ j(equal, oom_label);
 }
 
 
@@ -4919,8 +5124,7 @@ void CEntryStub::GenerateCore(MacroAssembler* masm,
   __ j(zero, &retry, Label::kNear);
 
   // Special handling of out of memory exceptions.
-  __ cmp(eax, reinterpret_cast<int32_t>(Failure::OutOfMemoryException()));
-  __ j(equal, throw_out_of_memory_exception);
+  JumpIfOOM(masm, eax, ecx, throw_out_of_memory_exception);
 
   // Retrieve the pending exception and clear the variable.
   __ mov(eax, Operand::StaticVariable(pending_exception_address));
@@ -5002,7 +5206,10 @@ void CEntryStub::Generate(MacroAssembler* masm) {
   // Set pending exception and eax to out of memory exception.
   ExternalReference pending_exception(Isolate::kPendingExceptionAddress,
                                       isolate);
-  __ mov(eax, reinterpret_cast<int32_t>(Failure::OutOfMemoryException()));
+  Label already_have_failure;
+  JumpIfOOM(masm, eax, ecx, &already_have_failure);
+  __ mov(eax, reinterpret_cast<int32_t>(Failure::OutOfMemoryException(0x1)));
+  __ bind(&already_have_failure);
   __ mov(Operand::StaticVariable(pending_exception), eax);
   // Fall through to the next label.
 
@@ -5445,10 +5652,10 @@ void StringCharFromCodeGenerator::GenerateFast(MacroAssembler* masm) {
   // Fast case of Heap::LookupSingleCharacterStringFromCode.
   STATIC_ASSERT(kSmiTag == 0);
   STATIC_ASSERT(kSmiShiftSize == 0);
-  ASSERT(IsPowerOf2(String::kMaxAsciiCharCode + 1));
+  ASSERT(IsPowerOf2(String::kMaxOneByteCharCode + 1));
   __ test(code_,
           Immediate(kSmiTagMask |
-                    ((~String::kMaxAsciiCharCode) << kSmiTagSize)));
+                    ((~String::kMaxOneByteCharCode) << kSmiTagSize)));
   __ j(not_zero, &slow_case_);
 
   Factory* factory = masm->isolate()->factory();
@@ -5482,23 +5689,6 @@ void StringCharFromCodeGenerator::GenerateSlow(
   __ jmp(&exit_);
 
   __ Abort("Unexpected fallthrough from CharFromCode slow case");
-}
-
-
-// -------------------------------------------------------------------------
-// StringCharAtGenerator
-
-void StringCharAtGenerator::GenerateFast(MacroAssembler* masm) {
-  char_code_at_generator_.GenerateFast(masm);
-  char_from_code_generator_.GenerateFast(masm);
-}
-
-
-void StringCharAtGenerator::GenerateSlow(
-    MacroAssembler* masm,
-    const RuntimeCallHelper& call_helper) {
-  char_code_at_generator_.GenerateSlow(masm, call_helper);
-  char_from_code_generator_.GenerateSlow(masm, call_helper);
 }
 
 
@@ -5649,6 +5839,13 @@ void StringAddStub::Generate(MacroAssembler* masm) {
   // edi: second instance type.
   __ test(ecx, Immediate(kAsciiDataHintMask));
   __ j(not_zero, &ascii_data);
+  __ mov(ecx, FieldOperand(eax, HeapObject::kMapOffset));
+  __ movzx_b(ecx, FieldOperand(ecx, Map::kInstanceTypeOffset));
+  __ xor_(edi, ecx);
+  STATIC_ASSERT(kOneByteStringTag != 0 && kAsciiDataHintTag != 0);
+  __ and_(edi, kOneByteStringTag | kAsciiDataHintTag);
+  __ cmp(edi, kOneByteStringTag | kAsciiDataHintTag);
+  __ j(equal, &ascii_data);
   // Allocate a two byte cons string.
   __ AllocateTwoByteConsString(ecx, edi, no_reg, &call_runtime);
   __ jmp(&allocated);
@@ -6161,6 +6358,10 @@ void SubStringStub::Generate(MacroAssembler* masm) {
   __ ret(3 * kPointerSize);
   __ bind(&not_original_string);
 
+  Label single_char;
+  __ cmp(ecx, Immediate(Smi::FromInt(1)));
+  __ j(equal, &single_char);
+
   // eax: string
   // ebx: instance type
   // ecx: sub string length (smi)
@@ -6331,6 +6532,17 @@ void SubStringStub::Generate(MacroAssembler* masm) {
   // Just jump to runtime to create the sub string.
   __ bind(&runtime);
   __ TailCallRuntime(Runtime::kSubString, 3, 1);
+
+  __ bind(&single_char);
+  // eax: string
+  // ebx: instance type
+  // ecx: sub string length (smi)
+  // edx: from index (smi)
+  StringCharAtGenerator generator(
+      eax, edx, ecx, eax, &runtime, &runtime, &runtime, STRING_INDEX_IS_NUMBER);
+  generator.GenerateFast(masm);
+  __ ret(3 * kPointerSize);
+  generator.SkipSlow(masm, &runtime);
 }
 
 
@@ -6407,7 +6619,12 @@ void StringCompareStub::GenerateCompareFlatAsciiStrings(MacroAssembler* masm,
   // Compare lengths -  strings up to min-length are equal.
   __ bind(&compare_lengths);
   __ test(length_delta, length_delta);
+#ifndef ENABLE_LATIN_1
   __ j(not_zero, &result_not_equal, Label::kNear);
+#else
+  Label length_not_equal;
+  __ j(not_zero, &length_not_equal, Label::kNear);
+#endif
 
   // Result is EQUAL.
   STATIC_ASSERT(EQUAL == 0);
@@ -6416,8 +6633,19 @@ void StringCompareStub::GenerateCompareFlatAsciiStrings(MacroAssembler* masm,
   __ ret(0);
 
   Label result_greater;
-  __ bind(&result_not_equal);
+#ifdef ENABLE_LATIN_1
+  Label result_less;
+  __ bind(&length_not_equal);
   __ j(greater, &result_greater, Label::kNear);
+  __ jmp(&result_less, Label::kNear);
+#endif
+  __ bind(&result_not_equal);
+#ifndef ENABLE_LATIN_1
+  __ j(greater, &result_greater, Label::kNear);
+#else
+  __ j(above, &result_greater, Label::kNear);
+  __ bind(&result_less);
+#endif
 
   // Result is LESS.
   __ Set(eax, Immediate(Smi::FromInt(LESS)));
@@ -7225,13 +7453,7 @@ void RecordWriteStub::InformIncrementalMarker(MacroAssembler* masm, Mode mode) {
   int argument_count = 3;
   __ PrepareCallCFunction(argument_count, regs_.scratch0());
   __ mov(Operand(esp, 0 * kPointerSize), regs_.object());
-  if (mode == INCREMENTAL_COMPACTION) {
-    __ mov(Operand(esp, 1 * kPointerSize), regs_.address());  // Slot.
-  } else {
-    ASSERT(mode == INCREMENTAL);
-    __ mov(regs_.scratch0(), Operand(regs_.address(), 0));
-    __ mov(Operand(esp, 1 * kPointerSize), regs_.scratch0());  // Value.
-  }
+  __ mov(Operand(esp, 1 * kPointerSize), regs_.address());  // Slot.
   __ mov(Operand(esp, 2 * kPointerSize),
          Immediate(ExternalReference::isolate_address()));
 
@@ -7426,6 +7648,22 @@ void StoreArrayLiteralElementStub::Generate(MacroAssembler* masm) {
 }
 
 
+void StubFailureTrampolineStub::Generate(MacroAssembler* masm) {
+  ASSERT(!Serializer::enabled());
+  bool save_fp_regs = CpuFeatures::IsSupported(SSE2);
+  CEntryStub ces(1, save_fp_regs ? kSaveFPRegs : kDontSaveFPRegs);
+  __ call(ces.GetCode(), RelocInfo::CODE_TARGET);
+  int parameter_count_offset =
+      StubFailureTrampolineFrame::kCallerStackParameterCountFrameOffset;
+  __ mov(ebx, MemOperand(ebp, parameter_count_offset));
+  masm->LeaveFrame(StackFrame::STUB_FAILURE_TRAMPOLINE);
+  __ pop(ecx);
+  __ lea(esp, MemOperand(esp, ebx, times_pointer_size,
+                         extra_expression_stack_count_ * kPointerSize));
+  __ jmp(ecx);  // Return to IC Miss stub, continuation still on stack.
+}
+
+
 void ProfileEntryHookStub::MaybeCallEntryHook(MacroAssembler* masm) {
   if (entry_hook_ != NULL) {
     ProfileEntryHookStub stub;
@@ -7449,7 +7687,7 @@ void ProfileEntryHookStub::Generate(MacroAssembler* masm) {
 
   // Call the entry hook.
   int32_t hook_location = reinterpret_cast<int32_t>(&entry_hook_);
-  __ call(Operand(hook_location, RelocInfo::NONE));
+  __ call(Operand(hook_location, RelocInfo::NONE32));
   __ add(esp, Immediate(2 * kPointerSize));
 
   // Restore ecx.

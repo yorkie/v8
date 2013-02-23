@@ -138,7 +138,7 @@ void FullCodeGenerator::Generate() {
 
 #ifdef DEBUG
   if (strlen(FLAG_stop_at) > 0 &&
-      info->function()->name()->IsEqualTo(CStrVector(FLAG_stop_at))) {
+      info->function()->name()->IsUtf8EqualTo(CStrVector(FLAG_stop_at))) {
     __ stop("stop-at");
   }
 #endif
@@ -149,15 +149,12 @@ void FullCodeGenerator::Generate() {
   // function calls.
   if (!info->is_classic_mode() || info->is_native()) {
     Label ok;
-    Label begin;
-    __ bind(&begin);
-    __ cmp(r5, Operand(0));
+    __ cmp(r5, Operand::Zero());
     __ b(eq, &ok);
     int receiver_offset = info->scope()->num_parameters() * kPointerSize;
     __ LoadRoot(r2, Heap::kUndefinedValueRootIndex);
     __ str(r2, MemOperand(sp, receiver_offset));
     __ bind(&ok);
-    ASSERT_EQ(kSizeOfFullCodegenStrictModePrologue, ok.pos() - begin.pos());
   }
 
   // Open a frame scope to indicate that there is a frame on the stack.  The
@@ -167,14 +164,19 @@ void FullCodeGenerator::Generate() {
 
   int locals_count = info->scope()->num_stack_slots();
 
-  // The following four instructions must remain together and unmodified for
-  // code aging to work properly.
-  __ stm(db_w, sp, r1.bit() | cp.bit() | fp.bit() | lr.bit());
-  // Load undefined value here, so the value is ready for the loop
-  // below.
-  __ LoadRoot(ip, Heap::kUndefinedValueRootIndex);
-  // Adjust fp to point to caller's fp.
-  __ add(fp, sp, Operand(2 * kPointerSize));
+  info->set_prologue_offset(masm_->pc_offset());
+  {
+    PredictableCodeSizeScope predictible_code_size_scope(
+        masm_, kNoCodeAgeSequenceLength * Assembler::kInstrSize);
+    // The following three instructions must remain together and unmodified
+    // for code aging to work properly.
+    __ stm(db_w, sp, r1.bit() | cp.bit() | fp.bit() | lr.bit());
+    // Load undefined value here, so the value is ready for the loop
+    // below.
+    __ LoadRoot(ip, Heap::kUndefinedValueRootIndex);
+    // Adjust FP to point to saved FP.
+    __ add(fp, sp, Operand(2 * kPointerSize));
+  }
 
   { Comment cmnt(masm_, "[ Allocate locals");
     for (int i = 0; i < locals_count; i++) {
@@ -290,7 +292,7 @@ void FullCodeGenerator::Generate() {
       __ LoadRoot(ip, Heap::kStackLimitRootIndex);
       __ cmp(sp, Operand(ip));
       __ b(hs, &ok);
-      PredictableCodeSizeScope predictable(masm_);
+      PredictableCodeSizeScope predictable(masm_, 2 * Assembler::kInstrSize);
       StackCheckStub stub;
       __ CallStub(&stub);
       __ bind(&ok);
@@ -345,42 +347,31 @@ void FullCodeGenerator::EmitProfilingCounterReset() {
 }
 
 
-void FullCodeGenerator::EmitStackCheck(IterationStatement* stmt,
-                                       Label* back_edge_target) {
-  Comment cmnt(masm_, "[ Stack check");
+void FullCodeGenerator::EmitBackEdgeBookkeeping(IterationStatement* stmt,
+                                                Label* back_edge_target) {
+  Comment cmnt(masm_, "[ Back edge bookkeeping");
   // Block literal pools whilst emitting stack check code.
   Assembler::BlockConstPoolScope block_const_pool(masm_);
   Label ok;
 
-  if (FLAG_count_based_interrupts) {
-    int weight = 1;
-    if (FLAG_weighted_back_edges) {
-      ASSERT(back_edge_target->is_bound());
-      int distance = masm_->SizeOfCodeGeneratedSince(back_edge_target);
-      weight = Min(kMaxBackEdgeWeight,
-                   Max(1, distance / kBackEdgeDistanceUnit));
-    }
-    EmitProfilingCounterDecrement(weight);
-    __ b(pl, &ok);
-    InterruptStub stub;
-    __ CallStub(&stub);
-  } else {
-    __ LoadRoot(ip, Heap::kStackLimitRootIndex);
-    __ cmp(sp, Operand(ip));
-    __ b(hs, &ok);
-    PredictableCodeSizeScope predictable(masm_);
-    StackCheckStub stub;
-    __ CallStub(&stub);
+  int weight = 1;
+  if (FLAG_weighted_back_edges) {
+    ASSERT(back_edge_target->is_bound());
+    int distance = masm_->SizeOfCodeGeneratedSince(back_edge_target);
+    weight = Min(kMaxBackEdgeWeight,
+                 Max(1, distance / kBackEdgeDistanceUnit));
   }
+  EmitProfilingCounterDecrement(weight);
+  __ b(pl, &ok);
+  InterruptStub stub;
+  __ CallStub(&stub);
 
   // Record a mapping of this PC offset to the OSR id.  This is used to find
   // the AST id from the unoptimized code in order to use it as a key into
   // the deoptimization input data found in the optimized code.
-  RecordStackCheck(stmt->OsrEntryId());
+  RecordBackEdge(stmt->OsrEntryId());
 
-  if (FLAG_count_based_interrupts) {
-    EmitProfilingCounterReset();
-  }
+  EmitProfilingCounterReset();
 
   __ bind(&ok);
   PrepareForBailoutForId(stmt->EntryId(), NO_REGISTERS);
@@ -442,7 +433,8 @@ void FullCodeGenerator::EmitReturnSequence() {
       // tool from instrumenting as we rely on the code size here.
       int32_t sp_delta = (info_->scope()->num_parameters() + 1) * kPointerSize;
       CodeGenerator::RecordPositions(masm_, function()->end_position() - 1);
-      PredictableCodeSizeScope predictable(masm_);
+      // TODO(svenpanne) The code below is sometimes 4 words, sometimes 5!
+      PredictableCodeSizeScope predictable(masm_, -1);
       __ RecordJSReturn();
       masm_->mov(sp, fp);
       masm_->ldm(ia_w, sp, fp.bit() | lr.bit());
@@ -683,7 +675,7 @@ void FullCodeGenerator::DoTest(Expression* condition,
                                Label* if_false,
                                Label* fall_through) {
   ToBooleanStub stub(result_register());
-  __ CallStub(&stub);
+  __ CallStub(&stub, condition->test_id());
   __ tst(result_register(), result_register());
   Split(ne, if_true, if_false, fall_through);
 }
@@ -917,34 +909,33 @@ void FullCodeGenerator::VisitFunctionDeclaration(
 
 
 void FullCodeGenerator::VisitModuleDeclaration(ModuleDeclaration* declaration) {
-  VariableProxy* proxy = declaration->proxy();
-  Variable* variable = proxy->var();
-  Handle<JSModule> instance = declaration->module()->interface()->Instance();
-  ASSERT(!instance.is_null());
+  Variable* variable = declaration->proxy()->var();
+  ASSERT(variable->location() == Variable::CONTEXT);
+  ASSERT(variable->interface()->IsFrozen());
 
-  switch (variable->location()) {
-    case Variable::UNALLOCATED: {
-      Comment cmnt(masm_, "[ ModuleDeclaration");
-      globals_->Add(variable->name(), zone());
-      globals_->Add(instance, zone());
-      Visit(declaration->module());
-      break;
-    }
+  Comment cmnt(masm_, "[ ModuleDeclaration");
+  EmitDebugCheckDeclarationContext(variable);
 
-    case Variable::CONTEXT: {
-      Comment cmnt(masm_, "[ ModuleDeclaration");
-      EmitDebugCheckDeclarationContext(variable);
-      __ mov(r1, Operand(instance));
-      __ str(r1, ContextOperand(cp, variable->index()));
-      Visit(declaration->module());
-      break;
-    }
+  // Load instance object.
+  __ LoadContext(r1, scope_->ContextChainLength(scope_->GlobalScope()));
+  __ ldr(r1, ContextOperand(r1, variable->interface()->Index()));
+  __ ldr(r1, ContextOperand(r1, Context::EXTENSION_INDEX));
 
-    case Variable::PARAMETER:
-    case Variable::LOCAL:
-    case Variable::LOOKUP:
-      UNREACHABLE();
-  }
+  // Assign it.
+  __ str(r1, ContextOperand(cp, variable->index()));
+  // We know that we have written a module, which is not a smi.
+  __ RecordWriteContextSlot(cp,
+                            Context::SlotOffset(variable->index()),
+                            r1,
+                            r3,
+                            kLRHasBeenSaved,
+                            kDontSaveFPRegs,
+                            EMIT_REMEMBERED_SET,
+                            OMIT_SMI_CHECK);
+  PrepareForBailoutForId(declaration->proxy()->id(), NO_REGISTERS);
+
+  // Traverse into body.
+  Visit(declaration->module());
 }
 
 
@@ -983,6 +974,14 @@ void FullCodeGenerator::DeclareGlobals(Handle<FixedArray> pairs) {
   __ mov(r0, Operand(Smi::FromInt(DeclareGlobalsFlags())));
   __ Push(cp, r1, r0);
   __ CallRuntime(Runtime::kDeclareGlobals, 3);
+  // Return value is ignored.
+}
+
+
+void FullCodeGenerator::DeclareModules(Handle<FixedArray> descriptions) {
+  // Call the runtime to declare the modules.
+  __ Push(descriptions);
+  __ CallRuntime(Runtime::kDeclareModules, 1);
   // Return value is ignored.
 }
 
@@ -1040,7 +1039,7 @@ void FullCodeGenerator::VisitSwitchStatement(SwitchStatement* stmt) {
     CallIC(ic, RelocInfo::CODE_TARGET, clause->CompareId());
     patch_site.EmitPatchInfo();
 
-    __ cmp(r0, Operand(0));
+    __ cmp(r0, Operand::Zero());
     __ b(ne, &next_test);
     __ Drop(1);  // Switch value is no longer needed.
     __ b(clause->body_target());
@@ -1241,7 +1240,7 @@ void FullCodeGenerator::VisitForInStatement(ForInStatement* stmt) {
   __ add(r0, r0, Operand(Smi::FromInt(1)));
   __ push(r0);
 
-  EmitStackCheck(stmt, &loop);
+  EmitBackEdgeBookkeeping(stmt, &loop);
   __ b(&loop);
 
   // Remove the pointers stored on the stack.
@@ -1394,9 +1393,9 @@ void FullCodeGenerator::EmitDynamicLookupFastCase(Variable* var,
   } else if (var->mode() == DYNAMIC_LOCAL) {
     Variable* local = var->local_if_not_shadowed();
     __ ldr(r0, ContextSlotOperandCheckExtensions(local, slow));
-    if (local->mode() == CONST ||
-        local->mode() == CONST_HARMONY ||
-        local->mode() == LET) {
+    if (local->mode() == LET ||
+        local->mode() == CONST ||
+        local->mode() == CONST_HARMONY) {
       __ CompareRoot(r0, Heap::kTheHoleValueRootIndex);
       if (local->mode() == CONST) {
         __ LoadRoot(r0, Heap::kUndefinedValueRootIndex, eq);
@@ -1720,7 +1719,9 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
   if (has_fast_elements && constant_elements_values->map() ==
       isolate()->heap()->fixed_cow_array_map()) {
     FastCloneShallowArrayStub stub(
-        FastCloneShallowArrayStub::COPY_ON_WRITE_ELEMENTS, length);
+        FastCloneShallowArrayStub::COPY_ON_WRITE_ELEMENTS,
+        DONT_TRACK_ALLOCATION_SITE,
+        length);
     __ CallStub(&stub);
     __ IncrementCounter(
         isolate()->counters()->cow_arrays_created_stub(), 1, r1, r2);
@@ -1731,10 +1732,17 @@ void FullCodeGenerator::VisitArrayLiteral(ArrayLiteral* expr) {
   } else {
     ASSERT(IsFastSmiOrObjectElementsKind(constant_elements_kind) ||
            FLAG_smi_only_arrays);
-    FastCloneShallowArrayStub::Mode mode = has_fast_elements
-      ? FastCloneShallowArrayStub::CLONE_ELEMENTS
-      : FastCloneShallowArrayStub::CLONE_ANY_ELEMENTS;
-    FastCloneShallowArrayStub stub(mode, length);
+    FastCloneShallowArrayStub::Mode mode =
+        FastCloneShallowArrayStub::CLONE_ANY_ELEMENTS;
+    AllocationSiteMode allocation_site_mode = FLAG_track_allocation_sites
+        ? TRACK_ALLOCATION_SITE : DONT_TRACK_ALLOCATION_SITE;
+
+    if (has_fast_elements) {
+      mode = FastCloneShallowArrayStub::CLONE_ELEMENTS;
+      allocation_site_mode = DONT_TRACK_ALLOCATION_SITE;
+    }
+
+    FastCloneShallowArrayStub stub(mode, allocation_site_mode, length);
     __ CallStub(&stub);
   }
 
@@ -1992,7 +2000,7 @@ void FullCodeGenerator::EmitInlineSmiBinaryOp(BinaryOperation* expr,
       __ mov(ip, Operand(scratch1, ASR, 31));
       __ cmp(ip, Operand(scratch2));
       __ b(ne, &stub_call);
-      __ cmp(scratch1, Operand(0));
+      __ cmp(scratch1, Operand::Zero());
       __ mov(right, Operand(scratch1), LeaveCC, ne);
       __ b(ne, &done);
       __ add(scratch2, right, Operand(left), SetCC);
@@ -2032,7 +2040,7 @@ void FullCodeGenerator::EmitBinaryOp(BinaryOperation* expr,
 
 
 void FullCodeGenerator::EmitAssignment(Expression* expr) {
-  // Invalid left-hand sides are rewritten to have a 'throw
+  // Invalid left-hand sides are rewritten by the parser to have a 'throw
   // ReferenceError' on the left-hand side.
   if (!expr->IsValidLeftHandSide()) {
     VisitForEffect(expr);
@@ -2331,7 +2339,7 @@ void FullCodeGenerator::EmitCallWithStub(Call* expr, CallFunctionFlags flags) {
 
   CallFunctionStub stub(arg_count, flags);
   __ ldr(r1, MemOperand(sp, (arg_count + 1) * kPointerSize));
-  __ CallStub(&stub);
+  __ CallStub(&stub, expr->CallFeedbackId());
   RecordJSReturnSite(expr);
   // Restore context register.
   __ ldr(cp, MemOperand(fp, StandardFrameConstants::kContextOffset));
@@ -2688,7 +2696,7 @@ void FullCodeGenerator::EmitIsStringWrapperSafeForDefaultValueOf(
 
   // Skip loop if no descriptors are valid.
   __ NumberOfOwnDescriptors(r3, r1);
-  __ cmp(r3, Operand(0));
+  __ cmp(r3, Operand::Zero());
   __ b(eq, &done);
 
   __ LoadInstanceDescriptors(r1, r4);
@@ -3019,7 +3027,7 @@ void FullCodeGenerator::EmitRandomHeapNumber(CallRuntime* expr) {
     // Move 0x41300000xxxxxxxx (x = random bits) to VFP.
     __ vmov(d7, r0, r1);
     // Move 0x4130000000000000 to VFP.
-    __ mov(r0, Operand(0, RelocInfo::NONE));
+    __ mov(r0, Operand::Zero());
     __ vmov(d8, r0, r1);
     // Subtract and store the result in the heap number.
     __ vsub(d7, d7, d8);
@@ -3130,6 +3138,39 @@ void FullCodeGenerator::EmitDateField(CallRuntime* expr) {
   __ bind(&done);
   context()->Plug(r0);
 }
+
+
+void FullCodeGenerator::EmitOneByteSeqStringSetChar(CallRuntime* expr) {
+  ZoneList<Expression*>* args = expr->arguments();
+  ASSERT_EQ(3, args->length());
+
+  VisitForStackValue(args->at(1));  // index
+  VisitForStackValue(args->at(2));  // value
+  __ pop(r2);
+  __ pop(r1);
+  VisitForAccumulatorValue(args->at(0));  // string
+
+  static const String::Encoding encoding = String::ONE_BYTE_ENCODING;
+  SeqStringSetCharGenerator::Generate(masm_, encoding, r0, r1, r2);
+  context()->Plug(r0);
+}
+
+
+void FullCodeGenerator::EmitTwoByteSeqStringSetChar(CallRuntime* expr) {
+  ZoneList<Expression*>* args = expr->arguments();
+  ASSERT_EQ(3, args->length());
+
+  VisitForStackValue(args->at(1));  // index
+  VisitForStackValue(args->at(2));  // value
+  __ pop(r2);
+  __ pop(r1);
+  VisitForAccumulatorValue(args->at(0));  // string
+
+  static const String::Encoding encoding = String::TWO_BYTE_ENCODING;
+  SeqStringSetCharGenerator::Generate(masm_, encoding, r0, r1, r2);
+  context()->Plug(r0);
+}
+
 
 
 void FullCodeGenerator::EmitMathPow(CallRuntime* expr) {
@@ -3602,7 +3643,7 @@ void FullCodeGenerator::EmitFastAsciiArrayJoin(CallRuntime* expr) {
 
   // Check that all array elements are sequential ASCII strings, and
   // accumulate the sum of their lengths, as a smi-encoded value.
-  __ mov(string_length, Operand(0));
+  __ mov(string_length, Operand::Zero());
   __ add(element,
          elements, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
   __ add(elements_end, element, Operand(array_length, LSL, kPointerSizeLog2));
@@ -3615,7 +3656,7 @@ void FullCodeGenerator::EmitFastAsciiArrayJoin(CallRuntime* expr) {
   //   element: Current array element.
   //   elements_end: Array end.
   if (generate_debug_code_) {
-    __ cmp(array_length, Operand(0));
+    __ cmp(array_length, Operand::Zero());
     __ Assert(gt, "No empty arrays here in EmitFastAsciiArrayJoin");
   }
   __ bind(&loop);
@@ -3658,7 +3699,7 @@ void FullCodeGenerator::EmitFastAsciiArrayJoin(CallRuntime* expr) {
   __ smull(scratch2, ip, array_length, scratch1);
   // Check for smi overflow. No overflow if higher 33 bits of 64-bit result are
   // zero.
-  __ cmp(ip, Operand(0));
+  __ cmp(ip, Operand::Zero());
   __ b(ne, &bailout);
   __ tst(scratch2, Operand(0x80000000));
   __ b(ne, &bailout);
@@ -4325,7 +4366,7 @@ void FullCodeGenerator::VisitCompareOperation(CompareOperation* expr) {
       CallIC(ic, RelocInfo::CODE_TARGET, expr->CompareOperationFeedbackId());
       patch_site.EmitPatchInfo();
       PrepareForBailoutBeforeSplit(expr, true, if_true, if_false);
-      __ cmp(r0, Operand(0));
+      __ cmp(r0, Operand::Zero());
       Split(cond, if_true, if_false, fall_through);
     }
   }

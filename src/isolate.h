@@ -53,6 +53,7 @@ namespace internal {
 class Bootstrapper;
 class CodeGenerator;
 class CodeRange;
+struct CodeStubInterfaceDescriptor;
 class CompilationCache;
 class ContextSlotCache;
 class ContextSwitcher;
@@ -70,13 +71,15 @@ class HeapProfiler;
 class InlineRuntimeFunctionsTable;
 class NoAllocationStringAllocator;
 class InnerPointerToCodeCache;
+class MarkingThread;
 class PreallocatedMemoryThread;
 class RegExpStack;
 class SaveContext;
 class UnicodeCache;
-class StringInputBuffer;
+class ConsStringIteratorOp;
 class StringTracker;
 class StubCache;
+class SweeperThread;
 class ThreadManager;
 class ThreadState;
 class ThreadVisitor;  // Defined in v8threads.h
@@ -467,6 +470,8 @@ class Isolate {
   // for legacy API reasons.
   void TearDown();
 
+  static void GlobalTearDown();
+
   bool IsDefaultIsolate() const { return this == default_isolate_; }
 
   // Ensures that process-wide resources and the default isolate have been
@@ -528,11 +533,6 @@ class Isolate {
   SaveContext* save_context() {return thread_local_top_.save_context_; }
   void set_save_context(SaveContext* save) {
     thread_local_top_.save_context_ = save;
-  }
-
-  // Access to the map of "new Object()".
-  Map* empty_object_map() {
-    return context()->native_context()->object_function()->map();
   }
 
   // Access to current thread id.
@@ -614,7 +614,7 @@ class Isolate {
   bool IsExternallyCaught();
 
   bool is_catchable_by_javascript(MaybeObject* exception) {
-    return (exception != Failure::OutOfMemoryException()) &&
+    return (!exception->IsOutOfMemory()) &&
         (exception != heap()->termination_exception());
   }
 
@@ -743,6 +743,8 @@ class Isolate {
   Failure* ReThrow(MaybeObject* exception);
   void ScheduleThrow(Object* exception);
   void ReportPendingMessages();
+  // Return pending location if any or unfilled structure.
+  MessageLocation GetMessageLocation();
   Failure* ThrowIllegalOperation();
 
   // Promote a scheduled exception to pending. Asserts has_scheduled_exception.
@@ -768,7 +770,6 @@ class Isolate {
   void Iterate(ObjectVisitor* v);
   void Iterate(ObjectVisitor* v, ThreadLocalTop* t);
   char* Iterate(ObjectVisitor* v, char* t);
-  void IterateThread(ThreadVisitor* v);
   void IterateThread(ThreadVisitor* v, char* t);
 
 
@@ -879,7 +880,7 @@ class Isolate {
     return inner_pointer_to_code_cache_;
   }
 
-  StringInputBuffer* write_input_buffer() { return write_input_buffer_; }
+  ConsStringIteratorOp* write_iterator() { return write_iterator_; }
 
   GlobalHandles* global_handles() { return global_handles_; }
 
@@ -901,16 +902,16 @@ class Isolate {
     return &jsregexp_canonrange_;
   }
 
-  StringInputBuffer* objects_string_compare_buffer_a() {
-    return &objects_string_compare_buffer_a_;
+  ConsStringIteratorOp* objects_string_compare_iterator_a() {
+    return &objects_string_compare_iterator_a_;
   }
 
-  StringInputBuffer* objects_string_compare_buffer_b() {
-    return &objects_string_compare_buffer_b_;
+  ConsStringIteratorOp* objects_string_compare_iterator_b() {
+    return &objects_string_compare_iterator_b_;
   }
 
-  StaticResource<StringInputBuffer>* objects_string_input_buffer() {
-    return &objects_string_input_buffer_;
+  StaticResource<ConsStringIteratorOp>* objects_string_iterator() {
+    return &objects_string_iterator_;
   }
 
   RuntimeState* runtime_state() { return &runtime_state_; }
@@ -920,10 +921,6 @@ class Isolate {
   }
 
   bool fp_stubs_generated() { return fp_stubs_generated_; }
-
-  StaticResource<SafeStringInputBuffer>* compiler_safe_string_input_buffer() {
-    return &compiler_safe_string_input_buffer_;
-  }
 
   Builtins* builtins() { return &builtins_; }
 
@@ -971,6 +968,9 @@ class Isolate {
   }
 
   int* code_kind_statistics() { return code_kind_statistics_; }
+
+  bool allow_handle_deref() { return allow_handle_deref_; }
+  void set_allow_handle_deref(bool allow) { allow_handle_deref_ = allow; }
 #endif
 
 #if defined(V8_TARGET_ARCH_ARM) && !defined(__arm__) || \
@@ -1018,7 +1018,6 @@ class Isolate {
         RuntimeProfiler::IsolateEnteredJS(this);
       } else if (current_state == JS && state != JS) {
         // JS -> non-JS transition.
-        ASSERT(RuntimeProfiler::IsSomeIsolateInJS());
         RuntimeProfiler::IsolateExitedJS(this);
       } else {
         // Other types of state transitions are not interesting to the
@@ -1062,12 +1061,28 @@ class Isolate {
     date_cache_ = date_cache;
   }
 
+  CodeStubInterfaceDescriptor*
+      code_stub_interface_descriptor(int index);
+
   void IterateDeferredHandles(ObjectVisitor* visitor);
   void LinkDeferredHandles(DeferredHandles* deferred_handles);
   void UnlinkDeferredHandles(DeferredHandles* deferred_handles);
 
   OptimizingCompilerThread* optimizing_compiler_thread() {
     return &optimizing_compiler_thread_;
+  }
+
+  // PreInits and returns a default isolate. Needed when a new thread tries
+  // to create a Locker for the first time (the lock itself is in the isolate).
+  // TODO(svenpanne) This method is on death row...
+  static v8::Isolate* GetDefaultIsolateForLocking();
+
+  MarkingThread** marking_threads() {
+    return marking_thread_;
+  }
+
+  SweeperThread** sweeper_threads() {
+    return sweeper_thread_;
   }
 
  private:
@@ -1153,10 +1168,6 @@ class Isolate {
   // If one does not yet exist, allocate a new one.
   PerIsolateThreadData* FindOrAllocatePerThreadDataForThisThread();
 
-  // PreInits and returns a default isolate. Needed when a new thread tries
-  // to create a Locker for the first time (the lock itself is in the isolate).
-  static Isolate* GetDefaultIsolateForLocking();
-
   // Initializes the current thread to run this Isolate.
   // Not thread-safe. Multiple threads should not Enter/Exit the same isolate
   // at the same time, this should be prevented using external locking.
@@ -1225,26 +1236,26 @@ class Isolate {
   PreallocatedStorage free_list_;
   bool preallocated_storage_preallocated_;
   InnerPointerToCodeCache* inner_pointer_to_code_cache_;
-  StringInputBuffer* write_input_buffer_;
+  ConsStringIteratorOp* write_iterator_;
   GlobalHandles* global_handles_;
   ContextSwitcher* context_switcher_;
   ThreadManager* thread_manager_;
   RuntimeState runtime_state_;
   bool fp_stubs_generated_;
-  StaticResource<SafeStringInputBuffer> compiler_safe_string_input_buffer_;
   Builtins builtins_;
   bool has_installed_extensions_;
   StringTracker* string_tracker_;
   unibrow::Mapping<unibrow::Ecma262UnCanonicalize> jsregexp_uncanonicalize_;
   unibrow::Mapping<unibrow::CanonicalizationRange> jsregexp_canonrange_;
-  StringInputBuffer objects_string_compare_buffer_a_;
-  StringInputBuffer objects_string_compare_buffer_b_;
-  StaticResource<StringInputBuffer> objects_string_input_buffer_;
+  ConsStringIteratorOp objects_string_compare_iterator_a_;
+  ConsStringIteratorOp objects_string_compare_iterator_b_;
+  StaticResource<ConsStringIteratorOp> objects_string_iterator_;
   unibrow::Mapping<unibrow::Ecma262Canonicalize>
       regexp_macro_assembler_canonicalize_;
   RegExpStack* regexp_stack_;
   DateCache* date_cache_;
   unibrow::Mapping<unibrow::Ecma262Canonicalize> interp_canonicalize_mapping_;
+  CodeStubInterfaceDescriptor* code_stub_interface_descriptors_;
 
   // The garbage collector should be a little more aggressive when it knows
   // that a context was recently exited.
@@ -1265,6 +1276,8 @@ class Isolate {
   HistogramInfo heap_histograms_[LAST_TYPE + 1];
   JSObject::SpillInformation js_spill_information_;
   int code_kind_statistics_[Code::NUMBER_OF_KINDS];
+
+  bool allow_handle_deref_;
 #endif
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
@@ -1295,16 +1308,21 @@ class Isolate {
 
   DeferredHandles* deferred_handles_head_;
   OptimizingCompilerThread optimizing_compiler_thread_;
+  MarkingThread** marking_thread_;
+  SweeperThread** sweeper_thread_;
 
   friend class ExecutionAccess;
   friend class HandleScopeImplementer;
   friend class IsolateInitializer;
+  friend class MarkingThread;
   friend class OptimizingCompilerThread;
+  friend class SweeperThread;
   friend class ThreadManager;
   friend class Simulator;
   friend class StackGuard;
   friend class ThreadId;
   friend class TestMemoryAllocatorScope;
+  friend class TestCodeRangeScope;
   friend class v8::Isolate;
   friend class v8::Locker;
   friend class v8::Unlocker;
