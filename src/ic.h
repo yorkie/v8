@@ -50,7 +50,6 @@ namespace internal {
   ICU(KeyedStoreIC_MissForceGeneric)                  \
   ICU(KeyedStoreIC_Slow)                              \
   /* Utilities for IC stubs. */                       \
-  ICU(LoadCallbackProperty)                           \
   ICU(StoreCallbackProperty)                          \
   ICU(LoadPropertyWithInterceptorOnly)                \
   ICU(LoadPropertyWithInterceptorForLoad)             \
@@ -129,7 +128,8 @@ class IC {
                                                             JSObject* holder);
   static inline InlineCacheHolderFlag GetCodeCacheForObject(JSObject* object,
                                                             JSObject* holder);
-  static inline JSObject* GetCodeCacheHolder(Object* object,
+  static inline JSObject* GetCodeCacheHolder(Isolate* isolate,
+                                             Object* object,
                                              InlineCacheHolderFlag holder);
 
  protected:
@@ -771,7 +771,7 @@ class CompareIC: public IC {
 
 
   // Factory method for getting an uninitialized compare stub.
-  static Handle<Code> GetUninitialized(Token::Value op);
+  static Handle<Code> GetUninitialized(Isolate* isolate, Token::Value op);
 
   // Helper function for computing the condition for a compare operation.
   static Condition ComputeCondition(Token::Value op);

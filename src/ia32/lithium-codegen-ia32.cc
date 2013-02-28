@@ -568,8 +568,8 @@ Operand LCodeGen::HighOperand(LOperand* op) {
 
 void LCodeGen::WriteTranslation(LEnvironment* environment,
                                 Translation* translation,
-                                int* arguments_index,
-                                int* arguments_count) {
+                                int* pushed_arguments_index,
+                                int* pushed_arguments_count) {
   if (environment == NULL) return;
 
   // The translation includes one command per value in the environment.
@@ -581,13 +581,13 @@ void LCodeGen::WriteTranslation(LEnvironment* environment,
   // arguments index points to the first element of a sequence of tagged
   // values on the stack that represent the arguments. This needs to be
   // kept in sync with the LArgumentsElements implementation.
-  *arguments_index = -environment->parameter_count();
-  *arguments_count = environment->parameter_count();
+  *pushed_arguments_index = -environment->parameter_count();
+  *pushed_arguments_count = environment->parameter_count();
 
   WriteTranslation(environment->outer(),
                    translation,
-                   arguments_index,
-                   arguments_count);
+                   pushed_arguments_index,
+                   pushed_arguments_count);
   bool has_closure_id = !info()->closure().is_null() &&
       *info()->closure() != *environment->closure();
   int closure_id = has_closure_id
@@ -621,13 +621,20 @@ void LCodeGen::WriteTranslation(LEnvironment* environment,
   }
 
   // Inlined frames which push their arguments cause the index to be
-  // bumped and another stack area to be used for materialization.
-  if (environment->entry() != NULL &&
-      environment->entry()->arguments_pushed()) {
-    *arguments_index = *arguments_index < 0
-        ? GetStackSlotCount()
-        : *arguments_index + *arguments_count;
-    *arguments_count = environment->entry()->arguments_count() + 1;
+  // bumped and another stack area to be used for materialization,
+  // otherwise actual argument values are unknown for inlined frames.
+  bool arguments_known = true;
+  int arguments_index = *pushed_arguments_index;
+  int arguments_count = *pushed_arguments_count;
+  if (environment->entry() != NULL) {
+    arguments_known = environment->entry()->arguments_pushed();
+    arguments_index = arguments_index < 0
+        ? GetStackSlotCount() : arguments_index + arguments_count;
+    arguments_count = environment->entry()->arguments_count() + 1;
+    if (environment->entry()->arguments_pushed()) {
+      *pushed_arguments_index = arguments_index;
+      *pushed_arguments_count = arguments_count;
+    }
   }
 
   for (int i = 0; i < translation_size; ++i) {
@@ -642,8 +649,9 @@ void LCodeGen::WriteTranslation(LEnvironment* environment,
                          environment->spilled_registers()[value->index()],
                          environment->HasTaggedValueAt(i),
                          environment->HasUint32ValueAt(i),
-                         *arguments_index,
-                         *arguments_count);
+                         arguments_known,
+                         arguments_index,
+                         arguments_count);
       } else if (
           value->IsDoubleRegister() &&
           environment->spilled_double_registers()[value->index()] != NULL) {
@@ -653,8 +661,9 @@ void LCodeGen::WriteTranslation(LEnvironment* environment,
             environment->spilled_double_registers()[value->index()],
             false,
             false,
-            *arguments_index,
-            *arguments_count);
+            arguments_known,
+            arguments_index,
+            arguments_count);
       }
     }
 
@@ -662,8 +671,9 @@ void LCodeGen::WriteTranslation(LEnvironment* environment,
                      value,
                      environment->HasTaggedValueAt(i),
                      environment->HasUint32ValueAt(i),
-                     *arguments_index,
-                     *arguments_count);
+                     arguments_known,
+                     arguments_index,
+                     arguments_count);
   }
 }
 
@@ -672,13 +682,15 @@ void LCodeGen::AddToTranslation(Translation* translation,
                                 LOperand* op,
                                 bool is_tagged,
                                 bool is_uint32,
+                                bool arguments_known,
                                 int arguments_index,
                                 int arguments_count) {
   if (op == NULL) {
     // TODO(twuerthinger): Introduce marker operands to indicate that this value
     // is not present and must be reconstructed from the deoptimizer. Currently
     // this is only used for the arguments object.
-    translation->StoreArgumentsObject(arguments_index, arguments_count);
+    translation->StoreArgumentsObject(
+        arguments_known, arguments_index, arguments_count);
   } else if (op->IsStackSlot()) {
     if (is_tagged) {
       translation->StoreStackSlot(op->index());
@@ -833,7 +845,8 @@ void LCodeGen::DeoptimizeIf(Condition cc, LEnvironment* environment) {
   Deoptimizer::BailoutType bailout_type = info()->IsStub()
       ? Deoptimizer::LAZY
       : Deoptimizer::EAGER;
-  Address entry = Deoptimizer::GetDeoptimizationEntry(id, bailout_type);
+  Address entry =
+      Deoptimizer::GetDeoptimizationEntry(isolate(), id, bailout_type);
   if (entry == NULL) {
     Abort("bailout was not prepared");
     return;
@@ -1088,38 +1101,38 @@ void LCodeGen::DoCallStub(LCallStub* instr) {
   switch (instr->hydrogen()->major_key()) {
     case CodeStub::RegExpConstructResult: {
       RegExpConstructResultStub stub;
-      CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+      CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
       break;
     }
     case CodeStub::RegExpExec: {
       RegExpExecStub stub;
-      CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+      CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
       break;
     }
     case CodeStub::SubString: {
       SubStringStub stub;
-      CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+      CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
       break;
     }
     case CodeStub::NumberToString: {
       NumberToStringStub stub;
-      CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+      CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
       break;
     }
     case CodeStub::StringAdd: {
       StringAddStub stub(NO_STRING_ADD_FLAGS);
-      CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+      CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
       break;
     }
     case CodeStub::StringCompare: {
       StringCompareStub stub;
-      CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+      CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
       break;
     }
     case CodeStub::TranscendentalCache: {
       TranscendentalCacheStub stub(instr->transcendental_type(),
                                    TranscendentalCacheStub::TAGGED);
-      CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+      CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
       break;
     }
     default:
@@ -1970,7 +1983,7 @@ void LCodeGen::DoArithmeticT(LArithmeticT* instr) {
   ASSERT(ToRegister(instr->result()).is(eax));
 
   BinaryOpStub stub(instr->op(), NO_OVERWRITE);
-  CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+  CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
   __ nop();  // Signals no inlined code.
 }
 
@@ -2164,7 +2177,6 @@ void LCodeGen::DoCmpIDAndBranch(LCmpIDAndBranch* instr) {
   int false_block = chunk_->LookupDestination(instr->false_block_id());
   int true_block = chunk_->LookupDestination(instr->true_block_id());
   Condition cc = TokenToCondition(instr->op(), instr->is_double());
-  CpuFeatures::Scope scope(SSE2);
 
   if (left->IsConstantOperand() && right->IsConstantOperand()) {
     // We can statically evaluate the comparison.
@@ -2176,6 +2188,7 @@ void LCodeGen::DoCmpIDAndBranch(LCmpIDAndBranch* instr) {
     EmitGoto(next_block);
   } else {
     if (instr->is_double()) {
+      CpuFeatures::Scope scope(SSE2);
       // Don't base result on EFLAGS when a NaN is involved. Instead
       // jump to the false block.
       __ ucomisd(ToDoubleRegister(left), ToDoubleRegister(right));
@@ -2372,7 +2385,7 @@ void LCodeGen::DoStringCompareAndBranch(LStringCompareAndBranch* instr) {
   int true_block = chunk_->LookupDestination(instr->true_block_id());
   int false_block = chunk_->LookupDestination(instr->false_block_id());
 
-  Handle<Code> ic = CompareIC::GetUninitialized(op);
+  Handle<Code> ic = CompareIC::GetUninitialized(isolate(), op);
   CallCode(ic, RelocInfo::CODE_TARGET, instr);
 
   Condition condition = ComputeCompareCondition(op);
@@ -2540,7 +2553,7 @@ void LCodeGen::DoInstanceOf(LInstanceOf* instr) {
   // Object and function are in fixed registers defined by the stub.
   ASSERT(ToRegister(instr->context()).is(esi));
   InstanceofStub stub(InstanceofStub::kArgsInRegisters);
-  CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+  CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
 
   Label true_value, done;
   __ test(eax, Operand(eax));
@@ -2641,7 +2654,7 @@ void LCodeGen::DoDeferredInstanceOfKnownGlobal(LInstanceOfKnownGlobal* instr,
   int delta = masm_->SizeOfCodeGeneratedSince(map_check) + kAdditionalDelta;
   __ mov(temp, Immediate(delta));
   __ StoreToSafepointRegisterSlot(temp, temp);
-  CallCodeGeneric(stub.GetCode(),
+  CallCodeGeneric(stub.GetCode(isolate()),
                   RelocInfo::CODE_TARGET,
                   instr,
                   RECORD_SAFEPOINT_WITH_REGISTERS_AND_NO_ARGUMENTS);
@@ -2655,10 +2668,18 @@ void LCodeGen::DoDeferredInstanceOfKnownGlobal(LInstanceOfKnownGlobal* instr,
 }
 
 
+void LCodeGen::DoInstanceSize(LInstanceSize* instr) {
+  Register object = ToRegister(instr->object());
+  Register result = ToRegister(instr->result());
+  __ mov(result, FieldOperand(object, HeapObject::kMapOffset));
+  __ movzx_b(result, FieldOperand(result, Map::kInstanceSizeOffset));
+}
+
+
 void LCodeGen::DoCmpT(LCmpT* instr) {
   Token::Value op = instr->op();
 
-  Handle<Code> ic = CompareIC::GetUninitialized(op);
+  Handle<Code> ic = CompareIC::GetUninitialized(isolate(), op);
   CallCode(ic, RelocInfo::CODE_TARGET, instr);
 
   Condition condition = ComputeCompareCondition(op);
@@ -3714,47 +3735,75 @@ void LCodeGen::DoMathFloor(LUnaryMathOperation* instr) {
 
 void LCodeGen::DoMathRound(LUnaryMathOperation* instr) {
   CpuFeatures::Scope scope(SSE2);
-  XMMRegister xmm_scratch = xmm0;
   Register output_reg = ToRegister(instr->result());
   XMMRegister input_reg = ToDoubleRegister(instr->value());
-
-  Label below_half, done;
-  // xmm_scratch = 0.5
+  XMMRegister xmm_scratch = xmm0;
   ExternalReference one_half = ExternalReference::address_of_one_half();
+  ExternalReference minus_one_half =
+      ExternalReference::address_of_minus_one_half();
+  bool minus_zero_check =
+      instr->hydrogen()->CheckFlag(HValue::kBailoutOnMinusZero);
+
   __ movdbl(xmm_scratch, Operand::StaticVariable(one_half));
-  __ ucomisd(xmm_scratch, input_reg);
-  __ j(above, &below_half);
-  // xmm_scratch = input + 0.5
-  __ addsd(xmm_scratch, input_reg);
 
-  // Compute Math.floor(value + 0.5).
-  // Use truncating instruction (OK because input is positive).
-  __ cvttsd2si(output_reg, Operand(xmm_scratch));
+  if (CpuFeatures::IsSupported(SSE4_1) && !minus_zero_check) {
+    CpuFeatures::Scope scope(SSE4_1);
 
-  // Overflow is signalled with minint.
-  __ cmp(output_reg, 0x80000000u);
-  DeoptimizeIf(equal, instr->environment());
-  __ jmp(&done);
-
-  __ bind(&below_half);
-
-  // We return 0 for the input range [+0, 0.5[, or [-0.5, 0.5[ if
-  // we can ignore the difference between a result of -0 and +0.
-  if (instr->hydrogen()->CheckFlag(HValue::kBailoutOnMinusZero)) {
-    // If the sign is positive, we return +0.
-    __ movmskpd(output_reg, input_reg);
-    __ test(output_reg, Immediate(1));
-    DeoptimizeIf(not_zero, instr->environment());
+    __ addsd(xmm_scratch, input_reg);
+    __ roundsd(xmm_scratch, xmm_scratch, Assembler::kRoundDown);
+    __ cvttsd2si(output_reg, Operand(xmm_scratch));
+    // Overflow is signalled with minint.
+    __ cmp(output_reg, 0x80000000u);
+    __ RecordComment("D2I conversion overflow");
+    DeoptimizeIf(equal, instr->environment());
   } else {
-    // If the input is >= -0.5, we return +0.
-    __ mov(output_reg, Immediate(0xBF000000));
-    __ movd(xmm_scratch, Operand(output_reg));
-    __ cvtss2sd(xmm_scratch, xmm_scratch);
-    __ ucomisd(input_reg, xmm_scratch);
-    DeoptimizeIf(below, instr->environment());
+    Label done, round_to_zero, below_one_half, do_not_compensate;
+    __ ucomisd(xmm_scratch, input_reg);
+    __ j(above, &below_one_half);
+
+    // CVTTSD2SI rounds towards zero, since 0.5 <= x, we use floor(0.5 + x).
+    __ addsd(xmm_scratch, input_reg);
+    __ cvttsd2si(output_reg, Operand(xmm_scratch));
+    // Overflow is signalled with minint.
+    __ cmp(output_reg, 0x80000000u);
+    __ RecordComment("D2I conversion overflow");
+    DeoptimizeIf(equal, instr->environment());
+    __ jmp(&done);
+
+    __ bind(&below_one_half);
+    __ movdbl(xmm_scratch, Operand::StaticVariable(minus_one_half));
+    __ ucomisd(xmm_scratch, input_reg);
+    __ j(below_equal, &round_to_zero);
+
+    // CVTTSD2SI rounds towards zero, we use ceil(x - (-0.5)) and then
+    // compare and compensate.
+    __ subsd(input_reg, xmm_scratch);
+    __ cvttsd2si(output_reg, Operand(input_reg));
+    // Catch minint due to overflow, and to prevent overflow when compensating.
+    __ cmp(output_reg, 0x80000000u);
+    __ RecordComment("D2I conversion overflow");
+    DeoptimizeIf(equal, instr->environment());
+
+    __ cvtsi2sd(xmm_scratch, output_reg);
+    __ ucomisd(xmm_scratch, input_reg);
+    __ j(equal, &done);
+    __ sub(output_reg, Immediate(1));
+    // No overflow because we already ruled out minint.
+    __ jmp(&done);
+
+    __ bind(&round_to_zero);
+    // We return 0 for the input range [+0, 0.5[, or [-0.5, 0.5[ if
+    // we can ignore the difference between a result of -0 and +0.
+    if (minus_zero_check) {
+      // If the sign is positive, we return +0.
+      __ movmskpd(output_reg, input_reg);
+      __ test(output_reg, Immediate(1));
+      __ RecordComment("Minus zero");
+      DeoptimizeIf(not_zero, instr->environment());
+    }
+    __ Set(output_reg, Immediate(0));
+    __ bind(&done);
   }
-  __ Set(output_reg, Immediate(0));
-  __ bind(&done);
 }
 
 
@@ -3958,7 +4007,7 @@ void LCodeGen::DoMathTan(LUnaryMathOperation* instr) {
   ASSERT(ToDoubleRegister(instr->result()).is(xmm1));
   TranscendentalCacheStub stub(TranscendentalCache::TAN,
                                TranscendentalCacheStub::UNTAGGED);
-  CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+  CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
 }
 
 
@@ -3966,7 +4015,7 @@ void LCodeGen::DoMathCos(LUnaryMathOperation* instr) {
   ASSERT(ToDoubleRegister(instr->result()).is(xmm1));
   TranscendentalCacheStub stub(TranscendentalCache::COS,
                                TranscendentalCacheStub::UNTAGGED);
-  CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+  CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
 }
 
 
@@ -3974,7 +4023,7 @@ void LCodeGen::DoMathSin(LUnaryMathOperation* instr) {
   ASSERT(ToDoubleRegister(instr->result()).is(xmm1));
   TranscendentalCacheStub stub(TranscendentalCache::SIN,
                                TranscendentalCacheStub::UNTAGGED);
-  CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+  CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
 }
 
 
@@ -4065,7 +4114,7 @@ void LCodeGen::DoCallFunction(LCallFunction* instr) {
 
   int arity = instr->arity();
   CallFunctionStub stub(arity, NO_CALL_FUNCTION_FLAGS);
-  CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+  CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
 }
 
 
@@ -4099,7 +4148,7 @@ void LCodeGen::DoCallNew(LCallNew* instr) {
 
   CallConstructStub stub(NO_CALL_FUNCTION_FLAGS);
   __ Set(eax, Immediate(instr->arity()));
-  CallCode(stub.GetCode(), RelocInfo::CONSTRUCT_CALL, instr);
+  CallCode(stub.GetCode(isolate()), RelocInfo::CONSTRUCT_CALL, instr);
 }
 
 
@@ -4526,7 +4575,7 @@ void LCodeGen::DoStringAdd(LStringAdd* instr) {
   EmitPushTaggedOperand(instr->left());
   EmitPushTaggedOperand(instr->right());
   StringAddStub stub(NO_STRING_CHECK_IN_STUB);
-  CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+  CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
 }
 
 
@@ -5459,21 +5508,20 @@ void LCodeGen::DoAllocate(LAllocate* instr) {
   DeferredAllocate* deferred =
       new(zone()) DeferredAllocate(this, instr);
 
-  Register size = ToRegister(instr->size());
   Register result = ToRegister(instr->result());
   Register temp = ToRegister(instr->temp());
 
-  HAllocate* original_instr = instr->hydrogen();
-  if (original_instr->size()->IsConstant()) {
-    UNREACHABLE();
+  // Allocate memory for the object.
+  AllocationFlags flags = TAG_OBJECT;
+  if (instr->hydrogen()->MustAllocateDoubleAligned()) {
+    flags = static_cast<AllocationFlags>(flags | DOUBLE_ALIGNMENT);
+  }
+  if (instr->size()->IsConstantOperand()) {
+    int32_t size = ToInteger32(LConstantOperand::cast(instr->size()));
+    __ AllocateInNewSpace(size, result, temp, no_reg, deferred->entry(), flags);
   } else {
-    // Allocate memory for the object.
-    AllocationFlags flags = TAG_OBJECT;
-    if (original_instr->MustAllocateDoubleAligned()) {
-      flags = static_cast<AllocationFlags>(flags | DOUBLE_ALIGNMENT);
-    }
-    __ AllocateInNewSpace(size, result, temp, no_reg,
-                          deferred->entry(), flags);
+    Register size = ToRegister(instr->size());
+    __ AllocateInNewSpace(size, result, temp, no_reg, deferred->entry(), flags);
   }
 
   __ bind(deferred->exit());
@@ -5537,7 +5585,7 @@ void LCodeGen::DoArrayLiteral(LArrayLiteral* instr) {
     FastCloneShallowArrayStub::Mode mode =
         FastCloneShallowArrayStub::COPY_ON_WRITE_ELEMENTS;
     FastCloneShallowArrayStub stub(mode, DONT_TRACK_ALLOCATION_SITE, length);
-    CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+    CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
   } else if (instr->hydrogen()->depth() > 1) {
     CallRuntime(Runtime::kCreateArrayLiteral, 3, instr);
   } else if (length > FastCloneShallowArrayStub::kMaximumClonedLength) {
@@ -5548,7 +5596,7 @@ void LCodeGen::DoArrayLiteral(LArrayLiteral* instr) {
         ? FastCloneShallowArrayStub::CLONE_DOUBLE_ELEMENTS
         : FastCloneShallowArrayStub::CLONE_ELEMENTS;
     FastCloneShallowArrayStub stub(mode, allocation_site_mode, length);
-    CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+    CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
   }
 }
 
@@ -5731,28 +5779,36 @@ void LCodeGen::DoObjectLiteral(LObjectLiteral* instr) {
   Handle<FixedArray> constant_properties =
       instr->hydrogen()->constant_properties();
 
-  // Set up the parameters to the stub/runtime call.
-  __ PushHeapObject(literals);
-  __ push(Immediate(Smi::FromInt(instr->hydrogen()->literal_index())));
-  __ push(Immediate(constant_properties));
   int flags = instr->hydrogen()->fast_elements()
       ? ObjectLiteral::kFastElements
       : ObjectLiteral::kNoFlags;
   flags |= instr->hydrogen()->has_function()
       ? ObjectLiteral::kHasFunction
       : ObjectLiteral::kNoFlags;
-  __ push(Immediate(Smi::FromInt(flags)));
 
-  // Pick the right runtime function or stub to call.
+  // Set up the parameters to the stub/runtime call and pick the right
+  // runtime function or stub to call.
   int properties_count = constant_properties->length() / 2;
   if (instr->hydrogen()->depth() > 1) {
+    __ PushHeapObject(literals);
+    __ push(Immediate(Smi::FromInt(instr->hydrogen()->literal_index())));
+    __ push(Immediate(constant_properties));
+    __ push(Immediate(Smi::FromInt(flags)));
     CallRuntime(Runtime::kCreateObjectLiteral, 4, instr);
   } else if (flags != ObjectLiteral::kFastElements ||
       properties_count > FastCloneShallowObjectStub::kMaximumClonedProperties) {
+    __ PushHeapObject(literals);
+    __ push(Immediate(Smi::FromInt(instr->hydrogen()->literal_index())));
+    __ push(Immediate(constant_properties));
+    __ push(Immediate(Smi::FromInt(flags)));
     CallRuntime(Runtime::kCreateObjectLiteralShallow, 4, instr);
   } else {
+    __ LoadHeapObject(eax, literals);
+    __ mov(ebx, Immediate(Smi::FromInt(instr->hydrogen()->literal_index())));
+    __ mov(ecx, Immediate(constant_properties));
+    __ mov(edx, Immediate(Smi::FromInt(flags)));
     FastCloneShallowObjectStub stub(properties_count);
-    CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+    CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
   }
 }
 
@@ -5825,7 +5881,7 @@ void LCodeGen::DoFunctionLiteral(LFunctionLiteral* instr) {
   if (!pretenure && shared_info->num_literals() == 0) {
     FastNewClosureStub stub(shared_info->language_mode());
     __ push(Immediate(shared_info));
-    CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+    CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
   } else {
     __ push(esi);
     __ push(Immediate(shared_info));
@@ -6046,7 +6102,7 @@ void LCodeGen::DoStackCheck(LStackCheck* instr) {
     ASSERT(instr->context()->IsRegister());
     ASSERT(ToRegister(instr->context()).is(esi));
     StackCheckStub stub;
-    CallCode(stub.GetCode(), RelocInfo::CODE_TARGET, instr);
+    CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
     EnsureSpaceForLazyDeopt();
     __ bind(&done);
     RegisterEnvironmentForDeoptimization(env, Safepoint::kLazyDeopt);
