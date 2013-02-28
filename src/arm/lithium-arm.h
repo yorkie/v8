@@ -108,6 +108,7 @@ class LCodeGen;
   V(In)                                         \
   V(InstanceOf)                                 \
   V(InstanceOfKnownGlobal)                      \
+  V(InstanceSize)                               \
   V(InstructionGap)                             \
   V(Integer32ToDouble)                          \
   V(Uint32ToDouble)                             \
@@ -139,6 +140,7 @@ class LCodeGen;
   V(ModI)                                       \
   V(MulI)                                       \
   V(MultiplyAddD)                               \
+  V(MultiplySubD)                               \
   V(NumberTagD)                                 \
   V(NumberTagI)                                 \
   V(NumberTagU)                                 \
@@ -660,6 +662,24 @@ class LMultiplyAddD: public LTemplateInstruction<1, 3, 0> {
 };
 
 
+// Instruction for computing minuend - multiplier * multiplicand.
+class LMultiplySubD: public LTemplateInstruction<1, 3, 0> {
+ public:
+  LMultiplySubD(LOperand* minuend, LOperand* multiplier,
+                LOperand* multiplicand) {
+    inputs_[0] = minuend;
+    inputs_[1] = multiplier;
+    inputs_[2] = multiplicand;
+  }
+
+  LOperand* minuend() { return inputs_[0]; }
+  LOperand* multiplier() { return inputs_[1]; }
+  LOperand* multiplicand() { return inputs_[2]; }
+
+  DECLARE_CONCRETE_INSTRUCTION(MultiplySubD, "multiply-sub-d")
+};
+
+
 class LCmpIDAndBranch: public LControlInstruction<2, 0> {
  public:
   LCmpIDAndBranch(LOperand* left, LOperand* right) {
@@ -977,6 +997,19 @@ class LInstanceOfKnownGlobal: public LTemplateInstruction<1, 1, 1> {
 
  private:
   LEnvironment* lazy_deopt_env_;
+};
+
+
+class LInstanceSize: public LTemplateInstruction<1, 1, 0> {
+ public:
+  explicit LInstanceSize(LOperand* object) {
+    inputs_[0] = object;
+  }
+
+  LOperand* object() { return inputs_[0]; }
+
+  DECLARE_CONCRETE_INSTRUCTION(InstanceSize, "instance-size")
+  DECLARE_HYDROGEN_ACCESSOR(InstanceSize)
 };
 
 
@@ -2540,6 +2573,7 @@ class LChunkBuilder BASE_EMBEDDED {
 #undef DECLARE_DO
 
   LInstruction* DoMultiplyAdd(HMul* mul, HValue* addend);
+  LInstruction* DoMultiplySub(HValue* minuend, HMul* mul);
   LInstruction* DoRSub(HSub* instr);
 
   static bool HasMagicNumberForDivisor(int32_t divisor);
