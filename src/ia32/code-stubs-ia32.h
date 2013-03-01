@@ -131,9 +131,9 @@ class UnaryOpStub: public PlatformCodeStub {
                              Label::Distance non_smi_near = Label::kFar);
   void GenerateSmiCodeUndo(MacroAssembler* masm);
 
-  void GenerateHeapNumberStub(MacroAssembler* masm);
-  void GenerateHeapNumberStubSub(MacroAssembler* masm);
-  void GenerateHeapNumberStubBitNot(MacroAssembler* masm);
+  void GenerateNumberStub(MacroAssembler* masm);
+  void GenerateNumberStubSub(MacroAssembler* masm);
+  void GenerateNumberStubBitNot(MacroAssembler* masm);
   void GenerateHeapNumberCodeSub(MacroAssembler* masm, Label* slow);
   void GenerateHeapNumberCodeBitNot(MacroAssembler* masm, Label* slow);
 
@@ -177,15 +177,15 @@ class StringHelper : public AllStatic {
                                         Register scratch,  // Neither of above.
                                         bool ascii);
 
-  // Probe the symbol table for a two character string. If the string
+  // Probe the string table for a two character string. If the string
   // requires non-standard hashing a jump to the label not_probed is
   // performed and registers c1 and c2 are preserved. In all other
   // cases they are clobbered. If the string is not found by probing a
   // jump to the label not_found is performed. This jump does not
-  // guarantee that the string is not in the symbol table. If the
+  // guarantee that the string is not in the string table. If the
   // string is found the code falls through with the string in
   // register eax.
-  static void GenerateTwoCharacterSymbolTableProbe(MacroAssembler* masm,
+  static void GenerateTwoCharacterStringTableProbe(MacroAssembler* masm,
                                                    Register c1,
                                                    Register c2,
                                                    Register scratch1,
