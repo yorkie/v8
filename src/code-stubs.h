@@ -736,7 +736,7 @@ class BinaryOpStub: public PlatformCodeStub {
   void GenerateBothStringStub(MacroAssembler* masm);
   void GenerateGeneric(MacroAssembler* masm);
   void GenerateGenericStub(MacroAssembler* masm);
-  void GenerateHeapNumberStub(MacroAssembler* masm);
+  void GenerateNumberStub(MacroAssembler* masm);
   void GenerateInt32Stub(MacroAssembler* masm);
   void GenerateLoadArguments(MacroAssembler* masm);
   void GenerateOddballStub(MacroAssembler* masm);
@@ -808,8 +808,8 @@ class ICCompareStub: public PlatformCodeStub {
   virtual int GetCodeKind() { return Code::COMPARE_IC; }
 
   void GenerateSmis(MacroAssembler* masm);
-  void GenerateHeapNumbers(MacroAssembler* masm);
-  void GenerateSymbols(MacroAssembler* masm);
+  void GenerateNumbers(MacroAssembler* masm);
+  void GenerateInternalizedStrings(MacroAssembler* masm);
   void GenerateStrings(MacroAssembler* masm);
   void GenerateObjects(MacroAssembler* masm);
   void GenerateMiss(MacroAssembler* masm);
@@ -821,7 +821,7 @@ class ICCompareStub: public PlatformCodeStub {
 
   virtual void AddToSpecialCache(Handle<Code> new_object);
   virtual bool FindCodeInSpecialCache(Code** code_out, Isolate* isolate);
-  virtual bool UseSpecialCache() { return state_ == CompareIC::KNOWN_OBJECTS; }
+  virtual bool UseSpecialCache() { return state_ == CompareIC::KNOWN_OBJECT; }
 
   Token::Value op_;
   CompareIC::State left_;
