@@ -184,6 +184,8 @@ void HeapObject::HeapObjectPrint(FILE* out) {
     case JS_GLOBAL_PROPERTY_CELL_TYPE:
       JSGlobalPropertyCell::cast(this)->JSGlobalPropertyCellPrint(out);
       break;
+    case JS_ARRAY_BUFFER_TYPE:
+      JSArrayBuffer::cast(this)->JSArrayBufferPrint(out);
 #define MAKE_STRUCT_CASE(NAME, Name, name) \
   case NAME##_TYPE:                        \
     Name::cast(this)->Name##Print(out);    \
@@ -259,7 +261,7 @@ void JSObject::PrintProperties(FILE* out) {
     DescriptorArray* descs = map()->instance_descriptors();
     for (int i = 0; i < map()->NumberOfOwnDescriptors(); i++) {
       PrintF(out, "   ");
-      descs->GetKey(i)->StringPrint(out);
+      descs->GetKey(i)->NamePrint(out);
       PrintF(out, ": ");
       switch (descs->GetType(i)) {
         case FIELD: {
@@ -417,7 +419,7 @@ void JSObject::PrintTransitions(FILE* out) {
   TransitionArray* transitions = map()->transitions();
   for (int i = 0; i < transitions->number_of_transitions(); i++) {
     PrintF(out, "   ");
-    transitions->GetKey(i)->StringPrint(out);
+    transitions->GetKey(i)->NamePrint(out);
     PrintF(out, ": ");
     switch (transitions->GetTargetDetails(i).type()) {
       case FIELD: {
@@ -552,6 +554,9 @@ static const char* TypeToString(InstanceType type) {
 void Symbol::SymbolPrint(FILE* out) {
   HeapObject::PrintHeader(out, "Symbol");
   PrintF(out, " - hash: %d\n", Hash());
+  PrintF(out, " - name: ");
+  name()->ShortPrint();
+  PrintF(out, "\n");
 }
 
 
@@ -599,6 +604,8 @@ void Map::MapPrint(FILE* out) {
   constructor()->ShortPrint(out);
   PrintF(out, "\n - code cache: ");
   code_cache()->ShortPrint(out);
+  PrintF(out, "\n - dependent code: ");
+  dependent_code()->ShortPrint(out);
   PrintF(out, "\n");
 }
 
@@ -710,6 +717,14 @@ void String::StringPrint(FILE* out) {
 }
 
 
+void Name::NamePrint(FILE* out) {
+  if (IsString())
+    String::cast(this)->StringPrint(out);
+  else
+    ShortPrint();
+}
+
+
 // This method is only meant to be called from gdb for debugging purposes.
 // Since the string can also be in two-byte encoding, non-ASCII characters
 // will be ignored in the output.
@@ -778,6 +793,16 @@ void JSWeakMap::JSWeakMapPrint(FILE* out) {
   PrintF(out, " - map = 0x%p\n", reinterpret_cast<void*>(map()));
   PrintF(out, " - table = ");
   table()->ShortPrint(out);
+  PrintF(out, "\n");
+}
+
+
+void JSArrayBuffer::JSArrayBufferPrint(FILE* out) {
+  HeapObject::PrintHeader(out, "JSArrayBuffer");
+  PrintF(out, " - map = 0x%p\n", reinterpret_cast<void*>(map()));
+  PrintF(out, " - backing_store = -0x%p\n", backing_store());
+  PrintF(out, " - byte_length = ");
+  byte_length()->ShortPrint(out);
   PrintF(out, "\n");
 }
 
@@ -919,7 +944,7 @@ void DeclaredAccessorInfo::DeclaredAccessorInfoPrint(FILE* out) {
 void DeclaredAccessorDescriptor::DeclaredAccessorDescriptorPrint(FILE* out) {
   HeapObject::PrintHeader(out, "DeclaredAccessorDescriptor");
   PrintF(out, "\n - internal field: ");
-  internal_field()->ShortPrint(out);
+  serialized_data()->ShortPrint(out);
 }
 
 
@@ -1039,7 +1064,18 @@ void TypeSwitchInfo::TypeSwitchInfoPrint(FILE* out) {
 void AllocationSiteInfo::AllocationSiteInfoPrint(FILE* out) {
   HeapObject::PrintHeader(out, "AllocationSiteInfo");
   PrintF(out, " - payload: ");
-  if (payload()->IsJSArray()) {
+  if (payload()->IsJSGlobalPropertyCell()) {
+    JSGlobalPropertyCell* cell = JSGlobalPropertyCell::cast(payload());
+    Object* cell_contents = cell->value();
+    if (cell_contents->IsSmi()) {
+      ElementsKind kind = static_cast<ElementsKind>(
+          Smi::cast(cell_contents)->value());
+      PrintF(out, "Array allocation with ElementsKind ");
+      PrintElementsKind(out, kind);
+      PrintF(out, "\n");
+      return;
+    }
+  } else if (payload()->IsJSArray()) {
     PrintF(out, "Array literal ");
     payload()->ShortPrint(out);
     PrintF(out, "\n");
@@ -1125,7 +1161,7 @@ void TransitionArray::PrintTransitions(FILE* out) {
   PrintF(out, "Transition array  %d\n", number_of_transitions());
   for (int i = 0; i < number_of_transitions(); i++) {
     PrintF(out, " %d: ", i);
-    GetKey(i)->StringPrint(out);
+    GetKey(i)->NamePrint(out);
     PrintF(out, ": ");
     switch (GetTargetDetails(i).type()) {
       case FIELD: {

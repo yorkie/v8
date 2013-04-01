@@ -341,9 +341,6 @@ void RegExpMacroAssemblerMIPS::CheckNotBackReferenceIgnoreCase(
     __ Or(t0, t0, Operand(0x20));  // Also convert input character.
     __ Branch(&fail, ne, t0, Operand(a3));
     __ Subu(a3, a3, Operand('a'));
-#ifndef ENABLE_LATIN_1
-    __ Branch(&fail, hi, a3, Operand('z' - 'a'));  // Is a3 a lowercase letter?
-#else
     __ Branch(&loop_check, ls, a3, Operand('z' - 'a'));
     // Latin-1: Check for values in range [224,254] but not 247.
     __ Subu(a3, a3, Operand(224 - 'a'));
@@ -351,7 +348,6 @@ void RegExpMacroAssemblerMIPS::CheckNotBackReferenceIgnoreCase(
     __ Branch(&fail, hi, a3, Operand(254 - 224));
     // Check for 247.
     __ Branch(&fail, eq, a3, Operand(247 - 224));
-#endif
 
     __ bind(&loop_check);
     __ Branch(&loop, lt, a0, Operand(a1));
@@ -541,25 +537,20 @@ bool RegExpMacroAssemblerMIPS::CheckSpecialCharacterClass(uc16 type,
   case 's':
     // Match space-characters.
     if (mode_ == ASCII) {
-      // ASCII space characters are '\t'..'\r' and ' '.
+      // One byte space characters are '\t'..'\r', ' ' and \u00a0.
       Label success;
       __ Branch(&success, eq, current_character(), Operand(' '));
       // Check range 0x09..0x0d.
       __ Subu(a0, current_character(), Operand('\t'));
-      BranchOrBacktrack(on_no_match, hi, a0, Operand('\r' - '\t'));
+      __ Branch(&success, ls, a0, Operand('\r' - '\t'));
+      // \u00a0 (NBSP).
+      BranchOrBacktrack(on_no_match, ne, a0, Operand(0x00a0 - '\t'));
       __ bind(&success);
       return true;
     }
     return false;
   case 'S':
-    // Match non-space characters.
-    if (mode_ == ASCII) {
-      // ASCII space characters are '\t'..'\r' and ' '.
-      BranchOrBacktrack(on_no_match, eq, current_character(), Operand(' '));
-      __ Subu(a0, current_character(), Operand('\t'));
-      BranchOrBacktrack(on_no_match, ls, a0, Operand('\r' - '\t'));
-      return true;
-    }
+    // The emitted code for generic character classes is good enough.
     return false;
   case 'd':
     // Match ASCII digits ('0'..'9').
@@ -1014,6 +1005,7 @@ void RegExpMacroAssemblerMIPS::PushBacktrack(Label* label) {
     int target = label->pos();
     __ li(a0, Operand(target + Code::kHeaderSize - kHeapObjectTag));
   } else {
+    Assembler::BlockTrampolinePoolScope block_trampoline_pool(masm_);
     Label after_constant;
     __ Branch(&after_constant);
     int offset = masm_->pc_offset();

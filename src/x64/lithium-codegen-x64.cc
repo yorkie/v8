@@ -308,7 +308,7 @@ bool LCodeGen::GenerateJumpTable() {
     bool is_lazy_deopt = jump_table_[i].is_lazy_deopt;
     Deoptimizer::BailoutType type =
         is_lazy_deopt ? Deoptimizer::LAZY : Deoptimizer::EAGER;
-    int id = Deoptimizer::GetDeoptimizationId(entry, type);
+    int id = Deoptimizer::GetDeoptimizationId(isolate(), entry, type);
     if (id == Deoptimizer::kNotDeoptimizationEntry) {
       Comment(";;; jump table entry %d.", i);
     } else {
@@ -353,9 +353,9 @@ bool LCodeGen::GenerateJumpTable() {
       }
     } else {
       if (is_lazy_deopt) {
-        __ Call(entry, RelocInfo::RUNTIME_ENTRY);
+        __ call(entry, RelocInfo::RUNTIME_ENTRY);
       } else {
-        __ Jump(entry, RelocInfo::RUNTIME_ENTRY);
+        __ jmp(entry, RelocInfo::RUNTIME_ENTRY);
       }
     }
   }
@@ -754,9 +754,9 @@ void LCodeGen::DeoptimizeIf(Condition cc, LEnvironment* environment) {
   bool needs_lazy_deopt = info()->IsStub();
   if (cc == no_condition && frame_is_built_) {
     if (needs_lazy_deopt) {
-      __ Call(entry, RelocInfo::RUNTIME_ENTRY);
+      __ call(entry, RelocInfo::RUNTIME_ENTRY);
     } else {
-      __ Jump(entry, RelocInfo::RUNTIME_ENTRY);
+      __ jmp(entry, RelocInfo::RUNTIME_ENTRY);
     }
   } else {
     // We often have several deopts to the same entry, reuse the last
@@ -808,7 +808,8 @@ void LCodeGen::PopulateDeoptimizationData(Handle<Code> code) {
   Handle<DeoptimizationInputData> data =
       factory()->NewDeoptimizationInputData(length, TENURED);
 
-  Handle<ByteArray> translations = translations_.CreateByteArray();
+  Handle<ByteArray> translations =
+      translations_.CreateByteArray(isolate()->factory());
   data->SetTranslationByteArray(*translations);
   data->SetInlinedFunctionCount(Smi::FromInt(inlined_function_count_));
 
@@ -1643,7 +1644,8 @@ void LCodeGen::DoDateField(LDateField* instr) {
   } else {
     if (index->value() < JSDate::kFirstUncachedField) {
       ExternalReference stamp = ExternalReference::date_cache_stamp(isolate());
-      __ movq(kScratchRegister, stamp);
+      Operand stamp_operand = __ ExternalOperand(stamp);
+      __ movq(kScratchRegister, stamp_operand);
       __ cmpq(kScratchRegister, FieldOperand(object,
                                              JSDate::kCacheStampOffset));
       __ j(not_equal, &runtime, Label::kNear);
@@ -2558,10 +2560,16 @@ void LCodeGen::DoReturn(LReturn* instr) {
     __ movq(rsp, rbp);
     __ pop(rbp);
   }
-  if (info()->IsStub()) {
-    __ Ret(0, r10);
+  if (instr->has_constant_parameter_count()) {
+    __ Ret((ToInteger32(instr->constant_parameter_count()) + 1) * kPointerSize,
+           rcx);
   } else {
-    __ Ret((GetParameterCount() + 1) * kPointerSize, rcx);
+    Register reg = ToRegister(instr->parameter_count());
+    Register return_addr_reg = reg.is(rcx) ? rbx : rcx;
+    __ pop(return_addr_reg);
+    __ shl(reg, Immediate(kPointerSizeLog2));
+    __ addq(rsp, reg);
+    __ jmp(return_addr_reg);
   }
 }
 
@@ -3474,7 +3482,7 @@ void LCodeGen::DoMathFloor(LUnaryMathOperation* instr) {
   XMMRegister input_reg = ToDoubleRegister(instr->value());
 
   if (CpuFeatures::IsSupported(SSE4_1)) {
-    CpuFeatures::Scope scope(SSE4_1);
+    CpuFeatureScope scope(masm(), SSE4_1);
     if (instr->hydrogen()->CheckFlag(HValue::kBailoutOnMinusZero)) {
       // Deoptimize if minus zero.
       __ movq(output_reg, input_reg);
@@ -3534,69 +3542,57 @@ void LCodeGen::DoMathRound(LUnaryMathOperation* instr) {
   static int64_t one_half = V8_INT64_C(0x3FE0000000000000);  // 0.5
   static int64_t minus_one_half = V8_INT64_C(0xBFE0000000000000);  // -0.5
 
-  bool minus_zero_check =
-      instr->hydrogen()->CheckFlag(HValue::kBailoutOnMinusZero);
-
+  Label done, round_to_zero, below_one_half, do_not_compensate, restore;
   __ movq(kScratchRegister, one_half, RelocInfo::NONE64);
   __ movq(xmm_scratch, kScratchRegister);
+  __ ucomisd(xmm_scratch, input_reg);
+  __ j(above, &below_one_half);
 
-  if (CpuFeatures::IsSupported(SSE4_1) && !minus_zero_check) {
-    CpuFeatures::Scope scope(SSE4_1);
-    __ addsd(xmm_scratch, input_reg);
-    __ roundsd(xmm_scratch, xmm_scratch, Assembler::kRoundDown);
-    __ cvttsd2si(output_reg, xmm_scratch);
-    // Overflow is signalled with minint.
-    __ cmpl(output_reg, Immediate(0x80000000));
-    __ RecordComment("D2I conversion overflow");
-    DeoptimizeIf(equal, instr->environment());
-  } else {
-    Label done, round_to_zero, below_one_half, do_not_compensate;
-    __ ucomisd(xmm_scratch, input_reg);
-    __ j(above, &below_one_half);
+  // CVTTSD2SI rounds towards zero, since 0.5 <= x, we use floor(0.5 + x).
+  __ addsd(xmm_scratch, input_reg);
+  __ cvttsd2si(output_reg, xmm_scratch);
+  // Overflow is signalled with minint.
+  __ cmpl(output_reg, Immediate(0x80000000));
+  __ RecordComment("D2I conversion overflow");
+  DeoptimizeIf(equal, instr->environment());
+  __ jmp(&done);
 
-    // CVTTSD2SI rounds towards zero, since 0.5 <= x, we use floor(0.5 + x).
-    __ addsd(xmm_scratch, input_reg);
-    __ cvttsd2si(output_reg, xmm_scratch);
-    // Overflow is signalled with minint.
-    __ cmpl(output_reg, Immediate(0x80000000));
-    __ RecordComment("D2I conversion overflow");
-    DeoptimizeIf(equal, instr->environment());
-    __ jmp(&done);
+  __ bind(&below_one_half);
+  __ movq(kScratchRegister, minus_one_half, RelocInfo::NONE64);
+  __ movq(xmm_scratch, kScratchRegister);
+  __ ucomisd(xmm_scratch, input_reg);
+  __ j(below_equal, &round_to_zero);
 
-    __ bind(&below_one_half);
-    __ movq(kScratchRegister, minus_one_half, RelocInfo::NONE64);
-    __ movq(xmm_scratch, kScratchRegister);
-    __ ucomisd(xmm_scratch, input_reg);
-    __ j(below_equal, &round_to_zero);
+  // CVTTSD2SI rounds towards zero, we use ceil(x - (-0.5)) and then
+  // compare and compensate.
+  __ movq(kScratchRegister, input_reg);  // Back up input_reg.
+  __ subsd(input_reg, xmm_scratch);
+  __ cvttsd2si(output_reg, input_reg);
+  // Catch minint due to overflow, and to prevent overflow when compensating.
+  __ cmpl(output_reg, Immediate(0x80000000));
+  __ RecordComment("D2I conversion overflow");
+  DeoptimizeIf(equal, instr->environment());
 
-    // CVTTSD2SI rounds towards zero, we use ceil(x - (-0.5)) and then
-    // compare and compensate.
-    __ subsd(input_reg, xmm_scratch);
-    __ cvttsd2si(output_reg, input_reg);
-    // Catch minint due to overflow, and to prevent overflow when compensating.
-    __ cmpl(output_reg, Immediate(0x80000000));
-    __ RecordComment("D2I conversion overflow");
-    DeoptimizeIf(equal, instr->environment());
+  __ cvtlsi2sd(xmm_scratch, output_reg);
+  __ ucomisd(input_reg, xmm_scratch);
+  __ j(equal, &restore, Label::kNear);
+  __ subl(output_reg, Immediate(1));
+  // No overflow because we already ruled out minint.
+  __ bind(&restore);
+  __ movq(input_reg, kScratchRegister);  // Restore input_reg.
+  __ jmp(&done);
 
-    __ cvtlsi2sd(xmm_scratch, output_reg);
-    __ ucomisd(input_reg, xmm_scratch);
-    __ j(equal, &done, Label::kNear);
-    __ subl(output_reg, Immediate(1));
-    // No overflow because we already ruled out minint.
-    __ jmp(&done);
-
-    __ bind(&round_to_zero);
-    // We return 0 for the input range [+0, 0.5[, or [-0.5, 0.5[ if
-    // we can ignore the difference between a result of -0 and +0.
-    if (minus_zero_check) {
-      __ movq(output_reg, input_reg);
-      __ testq(output_reg, output_reg);
-      __ RecordComment("Minus zero");
-      DeoptimizeIf(negative, instr->environment());
-    }
-    __ Set(output_reg, 0);
-    __ bind(&done);
+  __ bind(&round_to_zero);
+  // We return 0 for the input range [+0, 0.5[, or [-0.5, 0.5[ if
+  // we can ignore the difference between a result of -0 and +0.
+  if (instr->hydrogen()->CheckFlag(HValue::kBailoutOnMinusZero)) {
+    __ movq(output_reg, input_reg);
+    __ testq(output_reg, output_reg);
+    __ RecordComment("Minus zero");
+    DeoptimizeIf(negative, instr->environment());
   }
+  __ Set(output_reg, 0);
+  __ bind(&done);
 }
 
 
@@ -3925,14 +3921,39 @@ void LCodeGen::DoCallNew(LCallNew* instr) {
   ASSERT(ToRegister(instr->constructor()).is(rdi));
   ASSERT(ToRegister(instr->result()).is(rax));
 
-  CallConstructStub stub(NO_CALL_FUNCTION_FLAGS);
   __ Set(rax, instr->arity());
+  if (FLAG_optimize_constructed_arrays) {
+    // No cell in ebx for construct type feedback in optimized code
+    Handle<Object> undefined_value(isolate()->factory()->undefined_value());
+    __ Move(rbx, undefined_value);
+  }
+  CallConstructStub stub(NO_CALL_FUNCTION_FLAGS);
   CallCode(stub.GetCode(isolate()), RelocInfo::CONSTRUCT_CALL, instr);
+}
+
+
+void LCodeGen::DoCallNewArray(LCallNewArray* instr) {
+  ASSERT(ToRegister(instr->constructor()).is(rdi));
+  ASSERT(ToRegister(instr->result()).is(rax));
+  ASSERT(FLAG_optimize_constructed_arrays);
+
+  __ Set(rax, instr->arity());
+  __ Move(rbx, instr->hydrogen()->property_cell());
+  Handle<Code> array_construct_code =
+      isolate()->builtins()->ArrayConstructCode();
+  CallCode(array_construct_code, RelocInfo::CONSTRUCT_CALL, instr);
 }
 
 
 void LCodeGen::DoCallRuntime(LCallRuntime* instr) {
   CallRuntime(instr->function(), instr->arity(), instr);
+}
+
+
+void LCodeGen::DoInnerAllocatedObject(LInnerAllocatedObject* instr) {
+  Register result = ToRegister(instr->result());
+  Register base = ToRegister(instr->base_object());
+  __ lea(result, Operand(base, instr->offset()));
 }
 
 
@@ -5012,12 +5033,8 @@ void LCodeGen::DoAllocateObject(LAllocateObject* instr) {
   // the constructor's prototype changes, but instance size and property
   // counts remain unchanged (if slack tracking finished).
   ASSERT(!constructor->shared()->IsInobjectSlackTrackingInProgress());
-  __ AllocateInNewSpace(instance_size,
-                        result,
-                        no_reg,
-                        scratch,
-                        deferred->entry(),
-                        TAG_OBJECT);
+  __ Allocate(instance_size, result, no_reg, scratch, deferred->entry(),
+              TAG_OBJECT);
 
   __ bind(deferred->exit());
   if (FLAG_debug_code) {
@@ -5106,10 +5123,13 @@ void LCodeGen::DoAllocate(LAllocate* instr) {
   }
   if (instr->size()->IsConstantOperand()) {
     int32_t size = ToInteger32(LConstantOperand::cast(instr->size()));
-    __ AllocateInNewSpace(size, result, temp, no_reg, deferred->entry(), flags);
+    if (instr->hydrogen()->CanAllocateInOldPointerSpace()) {
+      flags = static_cast<AllocationFlags>(flags | PRETENURE_OLD_POINTER_SPACE);
+    }
+    __ Allocate(size, result, temp, no_reg, deferred->entry(), flags);
   } else {
     Register size = ToRegister(instr->size());
-    __ AllocateInNewSpace(size, result, temp, no_reg, deferred->entry(), flags);
+    __ Allocate(size, result, temp, no_reg, deferred->entry(), flags);
   }
 
   __ bind(deferred->exit());
@@ -5327,7 +5347,7 @@ void LCodeGen::DoFastLiteral(LFastLiteral* instr) {
   // Allocate all objects that are part of the literal in one big
   // allocation. This avoids multiple limit checks.
   Label allocated, runtime_allocate;
-  __ AllocateInNewSpace(size, rax, rcx, rdx, &runtime_allocate, TAG_OBJECT);
+  __ Allocate(size, rax, rcx, rdx, &runtime_allocate, TAG_OBJECT);
   __ jmp(&allocated);
 
   __ bind(&runtime_allocate);
@@ -5414,7 +5434,7 @@ void LCodeGen::DoRegExpLiteral(LRegExpLiteral* instr) {
   __ bind(&materialized);
   int size = JSRegExp::kSize + JSRegExp::kInObjectFieldCount * kPointerSize;
   Label allocated, runtime_allocate;
-  __ AllocateInNewSpace(size, rax, rcx, rdx, &runtime_allocate, TAG_OBJECT);
+  __ Allocate(size, rax, rcx, rdx, &runtime_allocate, TAG_OBJECT);
   __ jmp(&allocated);
 
   __ bind(&runtime_allocate);
@@ -5517,6 +5537,11 @@ Condition LCodeGen::EmitTypeofIs(Label* true_label,
     __ testb(FieldOperand(input, Map::kBitFieldOffset),
              Immediate(1 << Map::kIsUndetectable));
     final_branch_condition = zero;
+
+  } else if (type_name->Equals(heap()->symbol_string())) {
+    __ JumpIfSmi(input, false_label);
+    __ CmpObjectType(input, SYMBOL_TYPE, input);
+    final_branch_condition = equal;
 
   } else if (type_name->Equals(heap()->boolean_string())) {
     __ CompareRoot(input, Heap::kTrueValueRootIndex);

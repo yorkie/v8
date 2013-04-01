@@ -135,9 +135,11 @@ class PositionsRecorder;
   V(KEYED_EXTERNAL_ARRAY_STORE_IC_TAG, "KeyedExternalArrayStoreIC")     \
   V(LAZY_COMPILE_TAG,               "LazyCompile")                      \
   V(LOAD_IC_TAG,                    "LoadIC")                           \
+  V(LOAD_POLYMORPHIC_IC_TAG,        "LoadPolymorphicIC")                \
   V(REG_EXP_TAG,                    "RegExp")                           \
   V(SCRIPT_TAG,                     "Script")                           \
   V(STORE_IC_TAG,                   "StoreIC")                          \
+  V(STORE_POLYMORPHIC_IC_TAG,       "StorePolymorphicIC")               \
   V(STUB_TAG,                       "Stub")                             \
   V(NATIVE_FUNCTION_TAG,            "Function")                         \
   V(NATIVE_LAZY_COMPILE_TAG,        "LazyCompile")                      \
@@ -202,7 +204,7 @@ class Logger {
 
   // Emits an event that an undefined property was read from an
   // object.
-  void SuspectReadEvent(String* name, Object* obj);
+  void SuspectReadEvent(Name* name, Object* obj);
 
   // Emits an event when a message is put on or read from a debugging queue.
   // DebugTag lets us put a call-site specific label on the event.
@@ -223,22 +225,22 @@ class Logger {
 
   // ==== Events logged by --log-code. ====
   // Emits a code event for a callback function.
-  void CallbackEvent(String* name, Address entry_point);
-  void GetterCallbackEvent(String* name, Address entry_point);
-  void SetterCallbackEvent(String* name, Address entry_point);
+  void CallbackEvent(Name* name, Address entry_point);
+  void GetterCallbackEvent(Name* name, Address entry_point);
+  void SetterCallbackEvent(Name* name, Address entry_point);
   // Emits a code create event.
   void CodeCreateEvent(LogEventsAndTags tag,
                        Code* code, const char* source);
   void CodeCreateEvent(LogEventsAndTags tag,
-                       Code* code, String* name);
+                       Code* code, Name* name);
   void CodeCreateEvent(LogEventsAndTags tag,
                        Code* code,
                        SharedFunctionInfo* shared,
-                       String* name);
+                       Name* name);
   void CodeCreateEvent(LogEventsAndTags tag,
                        Code* code,
                        SharedFunctionInfo* shared,
-                       String* source, int line);
+                       Name* source, int line);
   void CodeCreateEvent(LogEventsAndTags tag, Code* code, int args_count);
   void CodeMovingGCEvent();
   // Emits a code create event for a RegExp.
@@ -394,7 +396,7 @@ class Logger {
 
   // Emits callback event messages.
   void CallbackEventInternal(const char* prefix,
-                             const char* name,
+                             Name* name,
                              Address entry_point);
 
   // Internal configurable move event.

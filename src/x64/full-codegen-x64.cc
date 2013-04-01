@@ -1514,7 +1514,7 @@ void FullCodeGenerator::VisitRegExpLiteral(RegExpLiteral* expr) {
   __ bind(&materialized);
   int size = JSRegExp::kSize + JSRegExp::kInObjectFieldCount * kPointerSize;
   Label allocated, runtime_allocate;
-  __ AllocateInNewSpace(size, rax, rcx, rdx, &runtime_allocate, TAG_OBJECT);
+  __ Allocate(size, rax, rcx, rdx, &runtime_allocate, TAG_OBJECT);
   __ jmp(&allocated);
 
   __ bind(&runtime_allocate);
@@ -1626,8 +1626,6 @@ void FullCodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
           }
           break;
         }
-        // Fall through.
-      case ObjectLiteral::Property::PROTOTYPE:
         __ push(Operand(rsp, 0));  // Duplicate receiver.
         VisitForStackValue(key);
         VisitForStackValue(value);
@@ -1636,6 +1634,15 @@ void FullCodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
           __ CallRuntime(Runtime::kSetProperty, 4);
         } else {
           __ Drop(3);
+        }
+        break;
+      case ObjectLiteral::Property::PROTOTYPE:
+        __ push(Operand(rsp, 0));  // Duplicate receiver.
+        VisitForStackValue(value);
+        if (property->emit_store()) {
+          __ CallRuntime(Runtime::kSetPrototype, 2);
+        } else {
+          __ Drop(2);
         }
         break;
       case ObjectLiteral::Property::GETTER:
@@ -3029,7 +3036,8 @@ void FullCodeGenerator::EmitDateField(CallRuntime* expr) {
   } else {
     if (index->value() < JSDate::kFirstUncachedField) {
       ExternalReference stamp = ExternalReference::date_cache_stamp(isolate());
-      __ movq(scratch, stamp);
+      Operand stamp_operand = __ ExternalOperand(stamp);
+      __ movq(scratch, stamp_operand);
       __ cmpq(scratch, FieldOperand(object, JSDate::kCacheStampOffset));
       __ j(not_equal, &runtime, Label::kNear);
       __ movq(result, FieldOperand(object, JSDate::kValueOffset +
@@ -4241,6 +4249,10 @@ void FullCodeGenerator::EmitLiteralCompareTypeof(Expression* expr,
     __ testb(FieldOperand(rdx, Map::kBitFieldOffset),
              Immediate(1 << Map::kIsUndetectable));
     Split(zero, if_true, if_false, fall_through);
+  } else if (check->Equals(isolate()->heap()->symbol_string())) {
+    __ JumpIfSmi(rax, if_false);
+    __ CmpObjectType(rax, SYMBOL_TYPE, rdx);
+    Split(equal, if_true, if_false, fall_through);
   } else if (check->Equals(isolate()->heap()->boolean_string())) {
     __ CompareRoot(rax, Heap::kTrueValueRootIndex);
     __ j(equal, if_true);

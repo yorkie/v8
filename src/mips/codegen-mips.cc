@@ -72,7 +72,7 @@ UnaryMathFunction CreateExpFunction() {
   MacroAssembler masm(NULL, buffer, static_cast<int>(actual_size));
 
   {
-    CpuFeatures::Scope use_fpu(FPU);
+    CpuFeatureScope use_fpu(&masm, FPU);
     DoubleRegister input = f12;
     DoubleRegister result = f0;
     DoubleRegister double_scratch1 = f4;
@@ -206,8 +206,9 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
   // Allocate new FixedDoubleArray.
   __ sll(scratch, t1, 2);
   __ Addu(scratch, scratch, FixedDoubleArray::kHeaderSize);
-  __ AllocateInNewSpace(scratch, t2, t3, t5, &gc_required, NO_ALLOCATION_FLAGS);
+  __ Allocate(scratch, t2, t3, t5, &gc_required, NO_ALLOCATION_FLAGS);
   // t2: destination FixedDoubleArray, not tagged as heap object
+
   // Set destination FixedDoubleArray's length and map.
   __ LoadRoot(t5, Heap::kFixedDoubleArrayMapRootIndex);
   __ sw(t1, MemOperand(t2, FixedDoubleArray::kLengthOffset));
@@ -278,7 +279,7 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
 
   // Normal smi, convert to double and store.
   if (fpu_supported) {
-    CpuFeatures::Scope scope(FPU);
+    CpuFeatureScope scope(masm, FPU);
     __ mtc1(t5, f0);
     __ cvt_d_w(f0, f0);
     __ sdc1(f0, MemOperand(t3));
@@ -351,7 +352,7 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
   // Allocate new FixedArray.
   __ sll(a0, t1, 1);
   __ Addu(a0, a0, FixedDoubleArray::kHeaderSize);
-  __ AllocateInNewSpace(a0, t2, t3, t5, &gc_required, NO_ALLOCATION_FLAGS);
+  __ Allocate(a0, t2, t3, t5, &gc_required, NO_ALLOCATION_FLAGS);
   // t2: destination FixedArray, not tagged as heap object
   // Set destination FixedDoubleArray's length and map.
   __ LoadRoot(t5, Heap::kFixedArrayMapRootIndex);
@@ -475,7 +476,7 @@ void StringCharLoadGenerator::Generate(MacroAssembler* masm,
   // the string.
   __ bind(&cons_string);
   __ lw(result, FieldMemOperand(string, ConsString::kSecondOffset));
-  __ LoadRoot(at, Heap::kEmptyStringRootIndex);
+  __ LoadRoot(at, Heap::kempty_stringRootIndex);
   __ Branch(call_runtime, ne, result, Operand(at));
   // Get the first of the two strings and load its instance type.
   __ lw(string, FieldMemOperand(string, ConsString::kFirstOffset));
@@ -702,7 +703,7 @@ void Code::PatchPlatformCodeAge(byte* sequence,
   uint32_t young_length;
   byte* young_sequence = GetNoCodeAgeSequence(&young_length);
   if (age == kNoAge) {
-    memcpy(sequence, young_sequence, young_length);
+    CopyBytes(sequence, young_sequence, young_length);
     CPU::FlushICache(sequence, young_length);
   } else {
     Code* stub = GetCodeAgeStub(age, parity);

@@ -393,9 +393,6 @@ void RegExpMacroAssemblerX64::CheckNotBackReferenceIgnoreCase(
     __ j(not_equal, on_no_match);  // Definitely not equal.
     __ subb(rax, Immediate('a'));
     __ cmpb(rax, Immediate('z' - 'a'));
-#ifndef ENABLE_LATIN_1
-    __ j(above, on_no_match);  // Weren't letters anyway.
-#else
     __ j(below_equal, &loop_increment);  // In range 'a'-'z'.
     // Latin-1: Check for values in range [224,254] but not 247.
     __ subb(rax, Immediate(224 - 'a'));
@@ -403,7 +400,6 @@ void RegExpMacroAssemblerX64::CheckNotBackReferenceIgnoreCase(
     __ j(above, on_no_match);  // Weren't Latin-1 letters.
     __ cmpb(rax, Immediate(247 - 224));  // Check for 247.
     __ j(equal, on_no_match);
-#endif
     __ bind(&loop_increment);
     // Increment pointers into match and capture strings.
     __ addq(r11, Immediate(1));
@@ -640,29 +636,23 @@ bool RegExpMacroAssemblerX64::CheckSpecialCharacterClass(uc16 type,
   case 's':
     // Match space-characters
     if (mode_ == ASCII) {
-      // ASCII space characters are '\t'..'\r' and ' '.
+      // One byte space characters are '\t'..'\r', ' ' and \u00a0.
       Label success;
       __ cmpl(current_character(), Immediate(' '));
-      __ j(equal, &success);
+      __ j(equal, &success, Label::kNear);
       // Check range 0x09..0x0d
       __ lea(rax, Operand(current_character(), -'\t'));
       __ cmpl(rax, Immediate('\r' - '\t'));
-      BranchOrBacktrack(above, on_no_match);
+      __ j(below_equal, &success, Label::kNear);
+      // \u00a0 (NBSP).
+      __ cmpl(rax, Immediate(0x00a0 - '\t'));
+      BranchOrBacktrack(not_equal, on_no_match);
       __ bind(&success);
       return true;
     }
     return false;
   case 'S':
-    // Match non-space characters.
-    if (mode_ == ASCII) {
-      // ASCII space characters are '\t'..'\r' and ' '.
-      __ cmpl(current_character(), Immediate(' '));
-      BranchOrBacktrack(equal, on_no_match);
-      __ lea(rax, Operand(current_character(), -'\t'));
-      __ cmpl(rax, Immediate('\r' - '\t'));
-      BranchOrBacktrack(below_equal, on_no_match);
-      return true;
-    }
+    // The emitted code for generic character classes is good enough.
     return false;
   case 'd':
     // Match ASCII digits ('0'..'9')

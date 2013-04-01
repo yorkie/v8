@@ -114,7 +114,7 @@ UnaryMathFunction CreateExpFunction() {
   // esp[1 * kPointerSize]: raw double input
   // esp[0 * kPointerSize]: return address
   {
-    CpuFeatures::Scope use_sse2(SSE2);
+    CpuFeatureScope use_sse2(&masm, SSE2);
     XMMRegister input = xmm1;
     XMMRegister result = xmm2;
     __ movdbl(input, Operand(esp, 1 * kPointerSize));
@@ -154,7 +154,7 @@ UnaryMathFunction CreateSqrtFunction() {
   // esp[0 * kPointerSize]: return address
   // Move double input into registers.
   {
-    CpuFeatures::Scope use_sse2(SSE2);
+    CpuFeatureScope use_sse2(&masm, SSE2);
     __ movdbl(xmm0, Operand(esp, 1 * kPointerSize));
     __ sqrtsd(xmm0, xmm0);
     __ movdbl(Operand(esp, 1 * kPointerSize), xmm0);
@@ -214,7 +214,7 @@ OS::MemCopyFunction CreateMemCopyFunction() {
     __ bind(&ok);
   }
   if (CpuFeatures::IsSupported(SSE2)) {
-    CpuFeatures::Scope enable(SSE2);
+    CpuFeatureScope enable(&masm, SSE2);
     __ push(edi);
     __ push(esi);
     stack_offset += 2 * kPointerSize;
@@ -450,9 +450,8 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
   // edi: length of source FixedArray (smi-tagged)
   AllocationFlags flags =
       static_cast<AllocationFlags>(TAG_OBJECT | DOUBLE_ALIGNMENT);
-  __ AllocateInNewSpace(FixedDoubleArray::kHeaderSize, times_8,
-                        edi, REGISTER_VALUE_IS_SMI,
-                        eax, ebx, no_reg, &gc_required, flags);
+  __ Allocate(FixedDoubleArray::kHeaderSize, times_8, edi,
+              REGISTER_VALUE_IS_SMI, eax, ebx, no_reg, &gc_required, flags);
 
   // eax: destination FixedDoubleArray
   // edi: number of elements
@@ -479,7 +478,7 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
       ExternalReference::address_of_the_hole_nan();
   XMMRegister the_hole_nan = xmm1;
   if (CpuFeatures::IsSupported(SSE2)) {
-    CpuFeatures::Scope use_sse2(SSE2);
+    CpuFeatureScope use_sse2(masm, SSE2);
     __ movdbl(the_hole_nan,
               Operand::StaticVariable(canonical_the_hole_nan_reference));
   }
@@ -504,7 +503,7 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
   // Normal smi, convert it to double and store.
   __ SmiUntag(ebx);
   if (CpuFeatures::IsSupported(SSE2)) {
-    CpuFeatures::Scope fscope(SSE2);
+    CpuFeatureScope fscope(masm, SSE2);
     __ cvtsi2sd(xmm0, ebx);
     __ movdbl(FieldOperand(eax, edi, times_4, FixedDoubleArray::kHeaderSize),
               xmm0);
@@ -525,7 +524,7 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
   }
 
   if (CpuFeatures::IsSupported(SSE2)) {
-    CpuFeatures::Scope use_sse2(SSE2);
+    CpuFeatureScope use_sse2(masm, SSE2);
     __ movdbl(FieldOperand(eax, edi, times_4, FixedDoubleArray::kHeaderSize),
               the_hole_nan);
   } else {
@@ -589,7 +588,7 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
   // Allocate new FixedArray.
   // ebx: length of source FixedDoubleArray (smi-tagged)
   __ lea(edi, Operand(ebx, times_2, FixedArray::kHeaderSize));
-  __ AllocateInNewSpace(edi, eax, esi, no_reg, &gc_required, TAG_OBJECT);
+  __ Allocate(edi, eax, esi, no_reg, &gc_required, TAG_OBJECT);
 
   // eax: destination FixedArray
   // ebx: number of elements
@@ -635,7 +634,7 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
   __ AllocateHeapNumber(edx, esi, no_reg, &gc_required);
   // edx: new heap number
   if (CpuFeatures::IsSupported(SSE2)) {
-    CpuFeatures::Scope fscope(SSE2);
+    CpuFeatureScope fscope(masm, SSE2);
     __ movdbl(xmm0,
               FieldOperand(edi, ebx, times_4, FixedDoubleArray::kHeaderSize));
     __ movdbl(FieldOperand(edx, HeapNumber::kValueOffset), xmm0);
@@ -952,7 +951,7 @@ void Code::PatchPlatformCodeAge(byte* sequence,
   uint32_t young_length;
   byte* young_sequence = GetNoCodeAgeSequence(&young_length);
   if (age == kNoAge) {
-    memcpy(sequence, young_sequence, young_length);
+    CopyBytes(sequence, young_sequence, young_length);
     CPU::FlushICache(sequence, young_length);
   } else {
     Code* stub = GetCodeAgeStub(age, parity);

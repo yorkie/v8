@@ -64,9 +64,7 @@ class Handle {
   INLINE(T* operator ->() const) { return operator*(); }
 
   // Check if this handle refers to the exact same object as the other handle.
-  bool is_identical_to(const Handle<T> other) const {
-    return *location_ == *other.location_;
-  }
+  INLINE(bool is_identical_to(const Handle<T> other) const);
 
   // Provides the C++ dereference operator.
   INLINE(T* operator*() const);
@@ -162,13 +160,14 @@ class HandleScope {
   // Extend the handle scope making room for more handles.
   static internal::Object** Extend(Isolate* isolate);
 
+#ifdef ENABLE_EXTRA_CHECKS
   // Zaps the handles in the half-open interval [start, end).
   static void ZapRange(internal::Object** start, internal::Object** end);
+#endif
 
-  friend class v8::internal::DeferredHandles;
   friend class v8::HandleScope;
+  friend class v8::internal::DeferredHandles;
   friend class v8::internal::HandleScopeImplementer;
-  friend class v8::ImplementationUtilities;
   friend class v8::internal::Isolate;
 };
 
@@ -233,11 +232,6 @@ Handle<Object> GetProperty(Handle<JSReceiver> obj,
 Handle<Object> GetProperty(Isolate* isolate,
                            Handle<Object> obj,
                            Handle<Object> key);
-
-Handle<Object> GetPropertyWithInterceptor(Handle<JSObject> receiver,
-                                          Handle<JSObject> holder,
-                                          Handle<String> name,
-                                          PropertyAttributes* attributes);
 
 Handle<Object> SetPrototype(Handle<JSObject> obj, Handle<Object> value);
 
@@ -341,29 +335,15 @@ class NoHandleAllocation BASE_EMBEDDED {
 };
 
 
-class NoHandleDereference BASE_EMBEDDED {
+class HandleDereferenceGuard BASE_EMBEDDED {
  public:
+  enum State { ALLOW, DISALLOW };
 #ifndef DEBUG
-  explicit NoHandleDereference(Isolate* isolate) {}
-  ~NoHandleDereference() {}
+  HandleDereferenceGuard(Isolate* isolate, State state) { }
+  ~HandleDereferenceGuard() { }
 #else
-  explicit inline NoHandleDereference(Isolate* isolate);
-  inline ~NoHandleDereference();
- private:
-  Isolate* isolate_;
-  bool old_state_;
-#endif
-};
-
-
-class AllowHandleDereference BASE_EMBEDDED {
- public:
-#ifndef DEBUG
-  explicit AllowHandleDereference(Isolate* isolate) {}
-  ~AllowHandleDereference() {}
-#else
-  explicit inline AllowHandleDereference(Isolate* isolate);
-  inline ~AllowHandleDereference();
+  inline HandleDereferenceGuard(Isolate* isolate,  State state);
+  inline ~HandleDereferenceGuard();
  private:
   Isolate* isolate_;
   bool old_state_;

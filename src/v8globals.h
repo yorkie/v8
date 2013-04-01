@@ -128,12 +128,13 @@ class FunctionTemplateInfo;
 class MemoryChunk;
 class SeededNumberDictionary;
 class UnseededNumberDictionary;
-class StringDictionary;
+class NameDictionary;
 template <typename T> class Handle;
 class Heap;
 class HeapObject;
 class IC;
 class InterceptorInfo;
+class JSReceiver;
 class JSArray;
 class JSFunction;
 class JSObject;
@@ -155,6 +156,7 @@ class Smi;
 template <typename Config, class Allocator = FreeStoreAllocationPolicy>
     class SplayTree;
 class String;
+class Name;
 class Struct;
 class Variable;
 class RelocInfo;
@@ -276,6 +278,7 @@ enum InlineCacheState {
 enum CheckType {
   RECEIVER_MAP_CHECK,
   STRING_CHECK,
+  SYMBOL_CHECK,
   NUMBER_CHECK,
   BOOLEAN_CHECK
 };

@@ -128,7 +128,8 @@ Assignment::Assignment(Isolate* isolate,
       pos_(pos),
       binary_operation_(NULL),
       assignment_id_(GetNextId(isolate)),
-      is_monomorphic_(false) { }
+      is_monomorphic_(false),
+      store_mode_(STANDARD_STORE) { }
 
 
 Token::Value Assignment::binary_op() const {
@@ -413,12 +414,9 @@ void Property::RecordTypeFeedback(TypeFeedbackOracle* oracle,
   is_monomorphic_ = oracle->LoadIsMonomorphicNormal(this);
   receiver_types_.Clear();
   if (key()->IsPropertyName()) {
-    ArrayLengthStub array_stub(Code::LOAD_IC);
     FunctionPrototypeStub proto_stub(Code::LOAD_IC);
     StringLengthStub string_stub(Code::LOAD_IC, false);
-    if (oracle->LoadIsStub(this, &array_stub)) {
-      is_array_length_ = true;
-    } else if (oracle->LoadIsStub(this, &string_stub)) {
+    if (oracle->LoadIsStub(this, &string_stub)) {
       is_string_length_ = true;
     } else if (oracle->LoadIsStub(this, &proto_stub)) {
       is_function_prototype_ = true;
@@ -455,9 +453,11 @@ void Assignment::RecordTypeFeedback(TypeFeedbackOracle* oracle,
   } else if (is_monomorphic_) {
     // Record receiver type for monomorphic keyed stores.
     receiver_types_.Add(oracle->StoreMonomorphicReceiverType(id), zone);
+    store_mode_ = oracle->GetStoreMode(id);
   } else if (oracle->StoreIsPolymorphic(id)) {
     receiver_types_.Reserve(kMaxKeyedPolymorphism, zone);
     oracle->CollectKeyedReceiverTypes(id, &receiver_types_);
+    store_mode_ = oracle->GetStoreMode(id);
   }
 }
 
@@ -475,6 +475,7 @@ void CountOperation::RecordTypeFeedback(TypeFeedbackOracle* oracle,
     receiver_types_.Reserve(kMaxKeyedPolymorphism, zone);
     oracle->CollectKeyedReceiverTypes(id, &receiver_types_);
   }
+  store_mode_ = oracle->GetStoreMode(id);
 }
 
 
@@ -605,6 +606,7 @@ void CallNew::RecordTypeFeedback(TypeFeedbackOracle* oracle) {
   is_monomorphic_ = oracle->CallNewIsMonomorphic(this);
   if (is_monomorphic_) {
     target_ = oracle->GetCallNewTarget(this);
+    elements_kind_ = oracle->GetCallNewElementsKind(this);
   }
 }
 
@@ -1006,11 +1008,6 @@ CaseClause::CaseClause(Isolate* isolate,
     add_flag(kDontInline); \
     add_flag(kDontSelfOptimize); \
   }
-#define DONT_INLINE_NODE(NodeType) \
-  void AstConstructionVisitor::Visit##NodeType(NodeType* node) { \
-    increase_node_count(); \
-    add_flag(kDontInline); \
-  }
 #define DONT_SELFOPTIMIZE_NODE(NodeType) \
   void AstConstructionVisitor::Visit##NodeType(NodeType* node) { \
     increase_node_count(); \
@@ -1037,8 +1034,10 @@ REGULAR_NODE(ReturnStatement)
 REGULAR_NODE(SwitchStatement)
 REGULAR_NODE(Conditional)
 REGULAR_NODE(Literal)
+REGULAR_NODE(ArrayLiteral)
 REGULAR_NODE(ObjectLiteral)
 REGULAR_NODE(RegExpLiteral)
+REGULAR_NODE(FunctionLiteral)
 REGULAR_NODE(Assignment)
 REGULAR_NODE(Throw)
 REGULAR_NODE(Property)
@@ -1069,9 +1068,6 @@ DONT_OPTIMIZE_NODE(TryFinallyStatement)
 DONT_OPTIMIZE_NODE(DebuggerStatement)
 DONT_OPTIMIZE_NODE(SharedFunctionInfoLiteral)
 
-DONT_INLINE_NODE(ArrayLiteral)  // TODO(1322): Allow materialized literals.
-DONT_INLINE_NODE(FunctionLiteral)
-
 DONT_SELFOPTIMIZE_NODE(DoWhileStatement)
 DONT_SELFOPTIMIZE_NODE(WhileStatement)
 DONT_SELFOPTIMIZE_NODE(ForStatement)
@@ -1098,7 +1094,6 @@ void AstConstructionVisitor::VisitCallRuntime(CallRuntime* node) {
 
 #undef REGULAR_NODE
 #undef DONT_OPTIMIZE_NODE
-#undef DONT_INLINE_NODE
 #undef DONT_SELFOPTIMIZE_NODE
 #undef DONT_CACHE_NODE
 

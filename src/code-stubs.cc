@@ -98,7 +98,11 @@ Handle<Code> PlatformCodeStub::GenerateCode() {
 
   // Copy the generated code into a heap object.
   Code::Flags flags = Code::ComputeFlags(
-      static_cast<Code::Kind>(GetCodeKind()), GetICState(), GetExtraICState());
+      static_cast<Code::Kind>(GetCodeKind()),
+      GetICState(),
+      GetExtraICState(),
+      GetStubType(),
+      GetStubFlags());
   Handle<Code> new_object = factory->NewCode(
       desc, flags, masm.CodeObject(), NeedsImmovableCode());
   return new_object;
@@ -376,6 +380,9 @@ void ICCompareStub::Generate(MacroAssembler* masm) {
     case CompareIC::INTERNALIZED_STRING:
       GenerateInternalizedStrings(masm);
       break;
+    case CompareIC::UNIQUE_NAME:
+      GenerateUniqueNames(masm);
+      break;
     case CompareIC::OBJECT:
       GenerateObjects(masm);
       break;
@@ -435,14 +442,14 @@ void KeyedStoreElementStub::Generate(MacroAssembler* masm) {
       KeyedStoreStubCompiler::GenerateStoreFastElement(masm,
                                                        is_js_array_,
                                                        elements_kind_,
-                                                       grow_mode_);
+                                                       store_mode_);
     }
       break;
     case FAST_DOUBLE_ELEMENTS:
     case FAST_HOLEY_DOUBLE_ELEMENTS:
       KeyedStoreStubCompiler::GenerateStoreFastDoubleElement(masm,
                                                              is_js_array_,
-                                                             grow_mode_);
+                                                             store_mode_);
       break;
     case EXTERNAL_BYTE_ELEMENTS:
     case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
@@ -503,6 +510,7 @@ void ToBooleanStub::Types::Print(StringStream* stream) const {
   if (Contains(SMI)) stream->Add("Smi");
   if (Contains(SPEC_OBJECT)) stream->Add("SpecObject");
   if (Contains(STRING)) stream->Add("String");
+  if (Contains(SYMBOL)) stream->Add("Symbol");
   if (Contains(HEAP_NUMBER)) stream->Add("HeapNumber");
 }
 
@@ -542,6 +550,9 @@ bool ToBooleanStub::Types::Record(Handle<Object> object) {
     Add(STRING);
     return !object->IsUndetectableObject() &&
         String::cast(*object)->length() != 0;
+  } else if (object->IsSymbol()) {
+    Add(SYMBOL);
+    return true;
   } else if (object->IsHeapNumber()) {
     ASSERT(!object->IsUndetectableObject());
     Add(HEAP_NUMBER);
@@ -558,6 +569,7 @@ bool ToBooleanStub::Types::Record(Handle<Object> object) {
 bool ToBooleanStub::Types::NeedsMap() const {
   return Contains(ToBooleanStub::SPEC_OBJECT)
       || Contains(ToBooleanStub::STRING)
+      || Contains(ToBooleanStub::SYMBOL)
       || Contains(ToBooleanStub::HEAP_NUMBER);
 }
 
@@ -586,13 +598,13 @@ void ElementsTransitionAndStoreStub::Generate(MacroAssembler* masm) {
       KeyedStoreStubCompiler::GenerateStoreFastElement(masm,
                                                        is_jsarray_,
                                                        to_,
-                                                       grow_mode_);
+                                                       store_mode_);
     } else if (IsFastSmiElementsKind(from_) &&
                IsFastDoubleElementsKind(to_)) {
       ElementsTransitionGenerator::GenerateSmiToDouble(masm, mode, &fail);
       KeyedStoreStubCompiler::GenerateStoreFastDoubleElement(masm,
                                                              is_jsarray_,
-                                                             grow_mode_);
+                                                             store_mode_);
     } else if (IsFastDoubleElementsKind(from_)) {
       ASSERT(to_ == FAST_HOLEY_DOUBLE_ELEMENTS);
       ElementsTransitionGenerator::

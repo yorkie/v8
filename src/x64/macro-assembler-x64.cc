@@ -551,7 +551,8 @@ void MacroAssembler::CallStub(CodeStub* stub, TypeFeedbackId ast_id) {
 
 
 void MacroAssembler::TailCallStub(CodeStub* stub) {
-  ASSERT(allow_stub_calls_ || stub->CompilingCallsToThisStubIsGCSafe());
+  ASSERT(allow_stub_calls_ ||
+         stub->CompilingCallsToThisStubIsGCSafe(isolate()));
   Jump(stub->GetCode(isolate()), RelocInfo::CODE_TARGET);
 }
 
@@ -564,7 +565,7 @@ void MacroAssembler::StubReturn(int argc) {
 
 bool MacroAssembler::AllowThisStubCall(CodeStub* stub) {
   if (!has_frame_ && stub->SometimesSetsUpAFrame()) return false;
-  return allow_stub_calls_ || stub->CompilingCallsToThisStubIsGCSafe();
+  return allow_stub_calls_ || stub->CompilingCallsToThisStubIsGCSafe(isolate());
 }
 
 
@@ -898,7 +899,7 @@ void MacroAssembler::PushCallerSaved(SaveFPRegsMode fp_mode,
   }
   // R12 to r15 are callee save on all platforms.
   if (fp_mode == kSaveFPRegs) {
-    CpuFeatures::Scope scope(SSE2);
+    CpuFeatureScope scope(this, SSE2);
     subq(rsp, Immediate(kDoubleSize * XMMRegister::kMaxNumRegisters));
     for (int i = 0; i < XMMRegister::kMaxNumRegisters; i++) {
       XMMRegister reg = XMMRegister::from_code(i);
@@ -913,7 +914,7 @@ void MacroAssembler::PopCallerSaved(SaveFPRegsMode fp_mode,
                                     Register exclusion2,
                                     Register exclusion3) {
   if (fp_mode == kSaveFPRegs) {
-    CpuFeatures::Scope scope(SSE2);
+    CpuFeatureScope scope(this, SSE2);
     for (int i = 0; i < XMMRegister::kMaxNumRegisters; i++) {
       XMMRegister reg = XMMRegister::from_code(i);
       movsd(reg, Operand(rsp, i * kDoubleSize));
@@ -2943,6 +2944,7 @@ void MacroAssembler::EnumLength(Register dst, Register map) {
 
 
 void MacroAssembler::DispatchMap(Register obj,
+                                 Register unused,
                                  Handle<Map> map,
                                  Handle<Code> success,
                                  SmiCheckType smi_check_type) {
@@ -3017,6 +3019,19 @@ void MacroAssembler::AssertString(Register object) {
 }
 
 
+void MacroAssembler::AssertName(Register object) {
+  if (emit_debug_code()) {
+    testb(object, Immediate(kSmiTagMask));
+    Check(not_equal, "Operand is a smi and not a name");
+    push(object);
+    movq(object, FieldOperand(object, HeapObject::kMapOffset));
+    CmpInstanceType(object, LAST_NAME_TYPE);
+    pop(object);
+    Check(below_equal, "Operand is not a name");
+  }
+}
+
+
 void MacroAssembler::AssertRootValue(Register src,
                                      Heap::RootListIndex root_value_index,
                                      const char* message) {
@@ -3038,6 +3053,16 @@ Condition MacroAssembler::IsObjectStringType(Register heap_object,
   STATIC_ASSERT(kNotStringTag != 0);
   testb(instance_type, Immediate(kIsNotStringMask));
   return zero;
+}
+
+
+Condition MacroAssembler::IsObjectNameType(Register heap_object,
+                                           Register map,
+                                           Register instance_type) {
+  movq(map, FieldOperand(heap_object, HeapObject::kMapOffset));
+  movzxbl(instance_type, FieldOperand(map, Map::kInstanceTypeOffset));
+  cmpb(instance_type, Immediate(static_cast<uint8_t>(LAST_NAME_TYPE)));
+  return below_equal;
 }
 
 
@@ -3691,8 +3716,8 @@ void MacroAssembler::LoadFromNumberDictionary(Label* miss,
 void MacroAssembler::LoadAllocationTopHelper(Register result,
                                              Register scratch,
                                              AllocationFlags flags) {
-  ExternalReference new_space_allocation_top =
-      ExternalReference::new_space_allocation_top_address(isolate());
+  ExternalReference allocation_top =
+      AllocationUtils::GetAllocationTopReference(isolate(), flags);
 
   // Just return if allocation top is already known.
   if ((flags & RESULT_CONTAINS_TOP) != 0) {
@@ -3700,7 +3725,7 @@ void MacroAssembler::LoadAllocationTopHelper(Register result,
     ASSERT(!scratch.is_valid());
 #ifdef DEBUG
     // Assert that result actually contains top on entry.
-    Operand top_operand = ExternalOperand(new_space_allocation_top);
+    Operand top_operand = ExternalOperand(allocation_top);
     cmpq(result, top_operand);
     Check(equal, "Unexpected allocation top");
 #endif
@@ -3710,40 +3735,41 @@ void MacroAssembler::LoadAllocationTopHelper(Register result,
   // Move address of new object to result. Use scratch register if available,
   // and keep address in scratch until call to UpdateAllocationTopHelper.
   if (scratch.is_valid()) {
-    LoadAddress(scratch, new_space_allocation_top);
+    LoadAddress(scratch, allocation_top);
     movq(result, Operand(scratch, 0));
   } else {
-    Load(result, new_space_allocation_top);
+    Load(result, allocation_top);
   }
 }
 
 
 void MacroAssembler::UpdateAllocationTopHelper(Register result_end,
-                                               Register scratch) {
+                                               Register scratch,
+                                               AllocationFlags flags) {
   if (emit_debug_code()) {
     testq(result_end, Immediate(kObjectAlignmentMask));
     Check(zero, "Unaligned allocation in new space");
   }
 
-  ExternalReference new_space_allocation_top =
-      ExternalReference::new_space_allocation_top_address(isolate());
+  ExternalReference allocation_top =
+      AllocationUtils::GetAllocationTopReference(isolate(), flags);
 
   // Update new top.
   if (scratch.is_valid()) {
     // Scratch already contains address of allocation top.
     movq(Operand(scratch, 0), result_end);
   } else {
-    Store(new_space_allocation_top, result_end);
+    Store(allocation_top, result_end);
   }
 }
 
 
-void MacroAssembler::AllocateInNewSpace(int object_size,
-                                        Register result,
-                                        Register result_end,
-                                        Register scratch,
-                                        Label* gc_required,
-                                        AllocationFlags flags) {
+void MacroAssembler::Allocate(int object_size,
+                              Register result,
+                              Register result_end,
+                              Register scratch,
+                              Label* gc_required,
+                              AllocationFlags flags) {
   ASSERT((flags & (RESULT_CONTAINS_TOP | SIZE_IN_WORDS)) == 0);
   if (!FLAG_inline_new) {
     if (emit_debug_code()) {
@@ -3772,8 +3798,8 @@ void MacroAssembler::AllocateInNewSpace(int object_size,
   }
 
   // Calculate new top and bail out if new space is exhausted.
-  ExternalReference new_space_allocation_limit =
-      ExternalReference::new_space_allocation_limit_address(isolate());
+  ExternalReference allocation_limit =
+      AllocationUtils::GetAllocationLimitReference(isolate(), flags);
 
   Register top_reg = result_end.is_valid() ? result_end : result;
 
@@ -3782,12 +3808,12 @@ void MacroAssembler::AllocateInNewSpace(int object_size,
   }
   addq(top_reg, Immediate(object_size));
   j(carry, gc_required);
-  Operand limit_operand = ExternalOperand(new_space_allocation_limit);
+  Operand limit_operand = ExternalOperand(allocation_limit);
   cmpq(top_reg, limit_operand);
   j(above, gc_required);
 
   // Update allocation top.
-  UpdateAllocationTopHelper(top_reg, scratch);
+  UpdateAllocationTopHelper(top_reg, scratch, flags);
 
   bool tag_result = (flags & TAG_OBJECT) != 0;
   if (top_reg.is(result)) {
@@ -3804,14 +3830,14 @@ void MacroAssembler::AllocateInNewSpace(int object_size,
 }
 
 
-void MacroAssembler::AllocateInNewSpace(int header_size,
-                                        ScaleFactor element_size,
-                                        Register element_count,
-                                        Register result,
-                                        Register result_end,
-                                        Register scratch,
-                                        Label* gc_required,
-                                        AllocationFlags flags) {
+void MacroAssembler::Allocate(int header_size,
+                              ScaleFactor element_size,
+                              Register element_count,
+                              Register result,
+                              Register result_end,
+                              Register scratch,
+                              Label* gc_required,
+                              AllocationFlags flags) {
   ASSERT((flags & SIZE_IN_WORDS) == 0);
   if (!FLAG_inline_new) {
     if (emit_debug_code()) {
@@ -3839,20 +3865,20 @@ void MacroAssembler::AllocateInNewSpace(int header_size,
   }
 
   // Calculate new top and bail out if new space is exhausted.
-  ExternalReference new_space_allocation_limit =
-      ExternalReference::new_space_allocation_limit_address(isolate());
+  ExternalReference allocation_limit =
+      AllocationUtils::GetAllocationLimitReference(isolate(), flags);
 
   // We assume that element_count*element_size + header_size does not
   // overflow.
   lea(result_end, Operand(element_count, element_size, header_size));
   addq(result_end, result);
   j(carry, gc_required);
-  Operand limit_operand = ExternalOperand(new_space_allocation_limit);
+  Operand limit_operand = ExternalOperand(allocation_limit);
   cmpq(result_end, limit_operand);
   j(above, gc_required);
 
   // Update allocation top.
-  UpdateAllocationTopHelper(result_end, scratch);
+  UpdateAllocationTopHelper(result_end, scratch, flags);
 
   // Tag the result if requested.
   if ((flags & TAG_OBJECT) != 0) {
@@ -3862,12 +3888,12 @@ void MacroAssembler::AllocateInNewSpace(int header_size,
 }
 
 
-void MacroAssembler::AllocateInNewSpace(Register object_size,
-                                        Register result,
-                                        Register result_end,
-                                        Register scratch,
-                                        Label* gc_required,
-                                        AllocationFlags flags) {
+void MacroAssembler::Allocate(Register object_size,
+                              Register result,
+                              Register result_end,
+                              Register scratch,
+                              Label* gc_required,
+                              AllocationFlags flags) {
   ASSERT((flags & (RESULT_CONTAINS_TOP | SIZE_IN_WORDS)) == 0);
   if (!FLAG_inline_new) {
     if (emit_debug_code()) {
@@ -3888,19 +3914,19 @@ void MacroAssembler::AllocateInNewSpace(Register object_size,
   LoadAllocationTopHelper(result, scratch, flags);
 
   // Calculate new top and bail out if new space is exhausted.
-  ExternalReference new_space_allocation_limit =
-      ExternalReference::new_space_allocation_limit_address(isolate());
+  ExternalReference allocation_limit =
+      AllocationUtils::GetAllocationLimitReference(isolate(), flags);
   if (!object_size.is(result_end)) {
     movq(result_end, object_size);
   }
   addq(result_end, result);
   j(carry, gc_required);
-  Operand limit_operand = ExternalOperand(new_space_allocation_limit);
+  Operand limit_operand = ExternalOperand(allocation_limit);
   cmpq(result_end, limit_operand);
   j(above, gc_required);
 
   // Update allocation top.
-  UpdateAllocationTopHelper(result_end, scratch);
+  UpdateAllocationTopHelper(result_end, scratch, flags);
 
   // Align the next allocation. Storing the filler map without checking top is
   // always safe because the limit of the heap is always aligned.
@@ -3935,12 +3961,7 @@ void MacroAssembler::AllocateHeapNumber(Register result,
                                         Register scratch,
                                         Label* gc_required) {
   // Allocate heap number in new space.
-  AllocateInNewSpace(HeapNumber::kSize,
-                     result,
-                     scratch,
-                     no_reg,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(HeapNumber::kSize, result, scratch, no_reg, gc_required, TAG_OBJECT);
 
   // Set the map.
   LoadRoot(kScratchRegister, Heap::kHeapNumberMapRootIndex);
@@ -3968,14 +3989,14 @@ void MacroAssembler::AllocateTwoByteString(Register result,
   }
 
   // Allocate two byte string in new space.
-  AllocateInNewSpace(SeqTwoByteString::kHeaderSize,
-                     times_1,
-                     scratch1,
-                     result,
-                     scratch2,
-                     scratch3,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SeqTwoByteString::kHeaderSize,
+           times_1,
+           scratch1,
+           result,
+           scratch2,
+           scratch3,
+           gc_required,
+           TAG_OBJECT);
 
   // Set the map, length and hash field.
   LoadRoot(kScratchRegister, Heap::kStringMapRootIndex);
@@ -4006,14 +4027,14 @@ void MacroAssembler::AllocateAsciiString(Register result,
   }
 
   // Allocate ASCII string in new space.
-  AllocateInNewSpace(SeqOneByteString::kHeaderSize,
-                     times_1,
-                     scratch1,
-                     result,
-                     scratch2,
-                     scratch3,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SeqOneByteString::kHeaderSize,
+           times_1,
+           scratch1,
+           result,
+           scratch2,
+           scratch3,
+           gc_required,
+           TAG_OBJECT);
 
   // Set the map, length and hash field.
   LoadRoot(kScratchRegister, Heap::kAsciiStringMapRootIndex);
@@ -4030,12 +4051,8 @@ void MacroAssembler::AllocateTwoByteConsString(Register result,
                                         Register scratch2,
                                         Label* gc_required) {
   // Allocate heap number in new space.
-  AllocateInNewSpace(ConsString::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(ConsString::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
 
   // Set the map. The other fields are left uninitialized.
   LoadRoot(kScratchRegister, Heap::kConsStringMapRootIndex);
@@ -4048,12 +4065,8 @@ void MacroAssembler::AllocateAsciiConsString(Register result,
                                              Register scratch2,
                                              Label* gc_required) {
   // Allocate heap number in new space.
-  AllocateInNewSpace(ConsString::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(ConsString::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
 
   // Set the map. The other fields are left uninitialized.
   LoadRoot(kScratchRegister, Heap::kConsAsciiStringMapRootIndex);
@@ -4066,12 +4079,8 @@ void MacroAssembler::AllocateTwoByteSlicedString(Register result,
                                           Register scratch2,
                                           Label* gc_required) {
   // Allocate heap number in new space.
-  AllocateInNewSpace(SlicedString::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SlicedString::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
 
   // Set the map. The other fields are left uninitialized.
   LoadRoot(kScratchRegister, Heap::kSlicedStringMapRootIndex);
@@ -4084,12 +4093,8 @@ void MacroAssembler::AllocateAsciiSlicedString(Register result,
                                                Register scratch2,
                                                Label* gc_required) {
   // Allocate heap number in new space.
-  AllocateInNewSpace(SlicedString::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SlicedString::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
 
   // Set the map. The other fields are left uninitialized.
   LoadRoot(kScratchRegister, Heap::kSlicedAsciiStringMapRootIndex);
@@ -4266,6 +4271,15 @@ void MacroAssembler::LoadGlobalFunction(int index, Register function) {
   movq(function, FieldOperand(function, GlobalObject::kNativeContextOffset));
   // Load the function from the native context.
   movq(function, Operand(function, Context::SlotOffset(index)));
+}
+
+
+void MacroAssembler::LoadArrayFunction(Register function) {
+  movq(function,
+       Operand(rsi, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
+  movq(function, FieldOperand(function, GlobalObject::kGlobalContextOffset));
+  movq(function,
+       Operand(function, Context::SlotOffset(Context::ARRAY_FUNCTION_INDEX)));
 }
 
 

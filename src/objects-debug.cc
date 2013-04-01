@@ -195,6 +195,9 @@ void HeapObject::HeapObjectVerify() {
     case JS_MESSAGE_OBJECT_TYPE:
       JSMessageObject::cast(this)->JSMessageObjectVerify();
       break;
+    case JS_ARRAY_BUFFER_TYPE:
+      JSArrayBuffer::cast(this)->JSArrayBufferVerify();
+      break;
 
 #define MAKE_STRUCT_CASE(NAME, Name, name) \
   case NAME##_TYPE:                        \
@@ -220,6 +223,7 @@ void Symbol::SymbolVerify() {
   CHECK(IsSymbol());
   CHECK(HasHashCode());
   CHECK_GT(Hash(), 0);
+  CHECK(name()->IsUndefined() || name()->IsString());
 }
 
 
@@ -486,16 +490,7 @@ void String::StringVerify() {
     ConsString::cast(this)->ConsStringVerify();
   } else if (IsSlicedString()) {
     SlicedString::cast(this)->SlicedStringVerify();
-  } else if (IsSeqOneByteString()) {
-    SeqOneByteString::cast(this)->SeqOneByteStringVerify();
   }
-}
-
-
-void SeqOneByteString::SeqOneByteStringVerify() {
-#ifndef ENABLE_LATIN_1
-  CHECK(String::IsAscii(GetChars(), length()));
-#endif
 }
 
 
@@ -720,6 +715,14 @@ void JSFunctionProxy::JSFunctionProxyVerify() {
   VerifyPointer(construct_trap());
 }
 
+void JSArrayBuffer::JSArrayBufferVerify() {
+  CHECK(IsJSArrayBuffer());
+  JSObjectVerify();
+  VerifyPointer(byte_length());
+  CHECK(byte_length()->IsSmi() || byte_length()->IsHeapNumber()
+        || byte_length()->IsUndefined());
+}
+
 
 void Foreign::ForeignVerify() {
   CHECK(IsForeign());
@@ -744,7 +747,7 @@ void ExecutableAccessorInfo::ExecutableAccessorInfoVerify() {
 
 void DeclaredAccessorDescriptor::DeclaredAccessorDescriptorVerify() {
   CHECK(IsDeclaredAccessorDescriptor());
-  VerifySmiField(kInternalFieldOffset);
+  VerifyPointer(serialized_data());
 }
 
 
@@ -922,7 +925,7 @@ void JSObject::IncrementSpillStatistics(SpillInformation* info) {
     info->number_of_fast_used_fields_   += map()->NextFreePropertyIndex();
     info->number_of_fast_unused_fields_ += map()->unused_property_fields();
   } else {
-    StringDictionary* dict = property_dictionary();
+    NameDictionary* dict = property_dictionary();
     info->number_of_slow_used_properties_ += dict->NumberOfElements();
     info->number_of_slow_unused_properties_ +=
         dict->Capacity() - dict->NumberOfElements();
@@ -1013,10 +1016,10 @@ void JSObject::SpillInformation::Print() {
 
 bool DescriptorArray::IsSortedNoDuplicates(int valid_entries) {
   if (valid_entries == -1) valid_entries = number_of_descriptors();
-  String* current_key = NULL;
+  Name* current_key = NULL;
   uint32_t current = 0;
   for (int i = 0; i < number_of_descriptors(); i++) {
-    String* key = GetSortedKey(i);
+    Name* key = GetSortedKey(i);
     if (key == current_key) {
       PrintDescriptors();
       return false;
@@ -1035,10 +1038,10 @@ bool DescriptorArray::IsSortedNoDuplicates(int valid_entries) {
 
 bool TransitionArray::IsSortedNoDuplicates(int valid_entries) {
   ASSERT(valid_entries == -1);
-  String* current_key = NULL;
+  Name* current_key = NULL;
   uint32_t current = 0;
   for (int i = 0; i < number_of_transitions(); i++) {
-    String* key = GetSortedKey(i);
+    Name* key = GetSortedKey(i);
     if (key == current_key) {
       PrintTransitions();
       return false;

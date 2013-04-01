@@ -68,6 +68,7 @@ class LCodeGen;
   V(CallKnownGlobal)                            \
   V(CallNamed)                                  \
   V(CallNew)                                    \
+  V(CallNewArray)                               \
   V(CallRuntime)                                \
   V(CallStub)                                   \
   V(CheckFunction)                              \
@@ -108,6 +109,7 @@ class LCodeGen;
   V(In)                                         \
   V(InstanceOf)                                 \
   V(InstanceOfKnownGlobal)                      \
+  V(InstanceSize)                               \
   V(InstructionGap)                             \
   V(Integer32ToDouble)                          \
   V(Uint32ToDouble)                             \
@@ -186,7 +188,9 @@ class LCodeGen;
   V(LoadFieldByIndex)                           \
   V(DateField)                                  \
   V(WrapReceiver)                               \
-  V(Drop)
+  V(Drop)                                       \
+  V(InnerAllocatedObject)
+
 
 #define DECLARE_CONCRETE_INSTRUCTION(type, mnemonic)              \
   virtual Opcode opcode() const { return LInstruction::k##type; } \
@@ -287,7 +291,6 @@ class LInstruction: public ZoneObject {
   SetOncePointer<LPointerMap> pointer_map_;
   HValue* hydrogen_value_;
   bool is_call_;
-  bool is_save_doubles_;
 };
 
 
@@ -959,6 +962,19 @@ class LInstanceOfKnownGlobal: public LTemplateInstruction<1, 1, 1> {
 };
 
 
+class LInstanceSize: public LTemplateInstruction<1, 1, 0> {
+ public:
+  explicit LInstanceSize(LOperand* object) {
+    inputs_[0] = object;
+  }
+
+  LOperand* object() { return inputs_[0]; }
+
+  DECLARE_CONCRETE_INSTRUCTION(InstanceSize, "instance-size")
+  DECLARE_HYDROGEN_ACCESSOR(InstanceSize)
+};
+
+
 class LBoundsCheck: public LTemplateInstruction<0, 2, 0> {
  public:
   LBoundsCheck(LOperand* index, LOperand* length) {
@@ -1328,13 +1344,23 @@ class LArithmeticT: public LTemplateInstruction<1, 2, 0> {
 };
 
 
-class LReturn: public LTemplateInstruction<0, 1, 0> {
+class LReturn: public LTemplateInstruction<0, 2, 0> {
  public:
-  explicit LReturn(LOperand* value) {
+  explicit LReturn(LOperand* value, LOperand* parameter_count) {
     inputs_[0] = value;
+    inputs_[1] = parameter_count;
   }
 
   LOperand* value() { return inputs_[0]; }
+
+  bool has_constant_parameter_count() {
+    return parameter_count()->IsConstantOperand();
+  }
+  LConstantOperand* constant_parameter_count() {
+    ASSERT(has_constant_parameter_count());
+    return LConstantOperand::cast(parameter_count());
+  }
+  LOperand* parameter_count() { return inputs_[1]; }
 
   DECLARE_CONCRETE_INSTRUCTION(Return, "return")
 };
@@ -1575,6 +1601,22 @@ class LDrop: public LTemplateInstruction<0, 0, 0> {
 };
 
 
+class LInnerAllocatedObject: public LTemplateInstruction<1, 1, 0> {
+ public:
+  explicit LInnerAllocatedObject(LOperand* base_object) {
+    inputs_[0] = base_object;
+  }
+
+  LOperand* base_object() { return inputs_[0]; }
+  int offset() { return hydrogen()->offset(); }
+
+  virtual void PrintDataTo(StringStream* stream);
+
+  DECLARE_CONCRETE_INSTRUCTION(InnerAllocatedObject, "sub-allocated-object")
+  DECLARE_HYDROGEN_ACCESSOR(InnerAllocatedObject)
+};
+
+
 class LThisFunction: public LTemplateInstruction<1, 0, 0> {
  public:
   DECLARE_CONCRETE_INSTRUCTION(ThisFunction, "this-function")
@@ -1741,6 +1783,23 @@ class LCallNew: public LTemplateInstruction<1, 1, 0> {
 
   DECLARE_CONCRETE_INSTRUCTION(CallNew, "call-new")
   DECLARE_HYDROGEN_ACCESSOR(CallNew)
+
+  virtual void PrintDataTo(StringStream* stream);
+
+  int arity() const { return hydrogen()->argument_count() - 1; }
+};
+
+
+class LCallNewArray: public LTemplateInstruction<1, 1, 0> {
+ public:
+  explicit LCallNewArray(LOperand* constructor) {
+    inputs_[0] = constructor;
+  }
+
+  LOperand* constructor() { return inputs_[0]; }
+
+  DECLARE_CONCRETE_INSTRUCTION(CallNewArray, "call-new-array")
+  DECLARE_HYDROGEN_ACCESSOR(CallNewArray)
 
   virtual void PrintDataTo(StringStream* stream);
 

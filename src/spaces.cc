@@ -537,6 +537,17 @@ bool MemoryChunk::CommitArea(size_t requested) {
 void MemoryChunk::InsertAfter(MemoryChunk* other) {
   next_chunk_ = other->next_chunk_;
   prev_chunk_ = other;
+
+  // This memory barrier is needed since concurrent sweeper threads may iterate
+  // over the list of pages while a new page is inserted.
+  // TODO(hpayer): find a cleaner way to guarantee that the page list can be
+  // expanded concurrently
+  MemoryBarrier();
+
+  // The following two write operations can take effect in arbitrary order
+  // since pages are always iterated by the sweeper threads in LIFO order, i.e,
+  // the inserted page becomes visible for the sweeper threads after
+  // other->next_chunk_ = this;
   other->next_chunk_->prev_chunk_ = this;
   other->next_chunk_ = this;
 }
@@ -981,6 +992,7 @@ bool PagedSpace::CanExpand() {
   return true;
 }
 
+
 bool PagedSpace::Expand() {
   if (!CanExpand()) return false;
 
@@ -1018,10 +1030,10 @@ intptr_t PagedSpace::SizeOfFirstPage() {
       size = 16 * kPointerSize * KB;
       break;
     case CODE_SPACE:
-      if (kPointerSize == 8) {
-        // On x64 we allocate code pages in a special way (from the reserved
-        // 2Byte area). That part of the code is not yet upgraded to handle
-        // small pages.
+      if (heap()->isolate()->code_range()->exists()) {
+        // When code range exists, code pages are allocated in a special way
+        // (from the reserved code range). That part of the code is not yet
+        // upgraded to handle small pages.
         size = AreaSize();
       } else {
         size = 384 * KB;
@@ -1045,7 +1057,7 @@ int PagedSpace::CountTotalPages() {
 }
 
 
-void PagedSpace::ReleasePage(Page* page) {
+void PagedSpace::ReleasePage(Page* page, bool unlink) {
   ASSERT(page->LiveBytes() == 0);
   ASSERT(AreaSize() == page->area_size());
 
@@ -1069,7 +1081,9 @@ void PagedSpace::ReleasePage(Page* page) {
     allocation_info_.top = allocation_info_.limit = NULL;
   }
 
-  page->Unlink();
+  if (unlink) {
+    page->Unlink();
+  }
   if (page->IsFlagSet(MemoryChunk::CONTAINS_ONLY_DATA)) {
     heap()->isolate()->memory_allocator()->Free(page);
   } else {
@@ -2476,6 +2490,12 @@ bool PagedSpace::ReserveSpace(int size_in_bytes) {
 }
 
 
+intptr_t PagedSpace::SizeOfObjects() {
+  ASSERT(!heap()->IsSweepingComplete() || (unswept_free_bytes_ == 0));
+  return Size() - unswept_free_bytes_ - (limit() - top());
+}
+
+
 // After we have booted, we have created a map which represents free space
 // on the heap.  If there was already a free list then the elements on it
 // were created with the wrong FreeSpaceMap (normally NULL), so we need to
@@ -2545,11 +2565,12 @@ void PagedSpace::EvictEvacuationCandidatesFromFreeLists() {
 bool PagedSpace::EnsureSweeperProgress(intptr_t size_in_bytes) {
   MarkCompactCollector* collector = heap()->mark_compact_collector();
   if (collector->AreSweeperThreadsActivated()) {
-    if (FLAG_concurrent_sweeping) {
+    if (collector->IsConcurrentSweepingInProgress()) {
       if (collector->StealMemoryFromSweeperThreads(this) < size_in_bytes) {
-        collector->WaitUntilSweepingCompleted();
-        collector->FinalizeSweeping();
-        return true;
+        if (!collector->sequential_sweeping()) {
+          collector->WaitUntilSweepingCompleted();
+          return true;
+        }
       }
       return false;
     }

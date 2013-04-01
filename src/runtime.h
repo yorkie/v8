@@ -55,7 +55,7 @@ namespace internal {
   F(IsPropertyEnumerable, 2, 1) \
   F(GetPropertyNames, 1, 1) \
   F(GetPropertyNamesFast, 1, 1) \
-  F(GetLocalPropertyNames, 1, 1) \
+  F(GetLocalPropertyNames, 2, 1) \
   F(GetLocalElementNames, 1, 1) \
   F(GetInterceptorInfo, 1, 1) \
   F(GetNamedInterceptorPropertyNames, 1, 1) \
@@ -67,6 +67,7 @@ namespace internal {
   F(GetDefaultReceiver, 1, 1) \
   \
   F(GetPrototype, 1, 1) \
+  F(SetPrototype, 2, 1) \
   F(IsInPrototypeChain, 2, 1) \
   \
   F(GetOwnProperty, 2, 1) \
@@ -86,7 +87,6 @@ namespace internal {
   F(LazyCompile, 1, 1) \
   F(LazyRecompile, 1, 1) \
   F(ParallelRecompile, 1, 1) \
-  F(ForceParallelRecompile, 1, 1) \
   F(InstallRecompiledCode, 1, 1) \
   F(NotifyDeoptimized, 1, 1) \
   F(NotifyStubFailure, 0, 1) \
@@ -95,11 +95,13 @@ namespace internal {
   F(ClearFunctionTypeFeedback, 1, 1) \
   F(RunningInSimulator, 0, 1) \
   F(OptimizeFunctionOnNextCall, -1, 1) \
+  F(WaitUntilOptimized, 1, 1) \
   F(GetOptimizationStatus, 1, 1) \
   F(GetOptimizationCount, 1, 1) \
   F(CompileForOnStackReplacement, 1, 1) \
   F(SetNewFunctionAttributes, 1, 1) \
   F(AllocateInNewSpace, 1, 1) \
+  F(AllocateInOldPointerSpace, 1, 1) \
   F(SetNativeFlag, 1, 1) \
   F(StoreArrayLiteralElement, 5, 1) \
   F(DebugCallbackSupportsStepping, 1, 1) \
@@ -127,6 +129,7 @@ namespace internal {
   F(NumberToString, 1, 1) \
   F(NumberToStringSkipCache, 1, 1) \
   F(NumberToInteger, 1, 1) \
+  F(NumberToPositiveInteger, 1, 1) \
   F(NumberToIntegerMapMinusZero, 1, 1) \
   F(NumberToJSUint32, 1, 1) \
   F(NumberToJSInt32, 1, 1) \
@@ -193,8 +196,6 @@ namespace internal {
   F(ParseJson, 1, 1) \
   F(BasicJSONStringify, 1, 1) \
   F(QuoteJSONString, 1, 1) \
-  F(QuoteJSONStringComma, 1, 1) \
-  F(QuoteJSONStringArray, 1, 1) \
   \
   /* Strings */ \
   F(StringCharCodeAt, 2, 1) \
@@ -264,7 +265,7 @@ namespace internal {
   /* Numbers */ \
   \
   /* Globals */ \
-  F(CompileString, 1, 1) \
+  F(CompileString, 2, 1) \
   F(GlobalPrint, 1, 1) \
   \
   /* Eval */ \
@@ -295,6 +296,10 @@ namespace internal {
   \
   /* Harmony modules */ \
   F(IsJSModule, 1, 1) \
+  \
+  /* Harmony symbols */ \
+  F(CreateSymbol, 1, 1) \
+  F(SymbolName, 1, 1) \
   \
   /* Harmony proxies */ \
   F(CreateJSProxy, 2, 1) \
@@ -335,6 +340,11 @@ namespace internal {
   F(GetObservationState, 0, 1) \
   F(ObservationWeakMapCreate, 0, 1) \
   F(UnwrapGlobalProxy, 1, 1) \
+  \
+  /* Harmony typed arrays */ \
+  F(ArrayBufferInitialize, 2, 1)\
+  F(ArrayBufferGetByteLength, 1, 1)\
+  F(ArrayBufferSliceImpl, 3, 1) \
   \
   /* Statements */ \
   F(NewClosure, 3, 1) \
@@ -542,7 +552,7 @@ namespace internal {
 
 
 // ----------------------------------------------------------------------------
-// INLINE_AND_RUNTIME_FUNCTION_LIST defines all inlined functions accessed
+// INLINE_RUNTIME_FUNCTION_LIST defines all inlined functions accessed
 // with a native call of the form %_name from within JS code that also have
 // a corresponding runtime function, that is called for slow cases.
 // Entries have the form F(name, number of arguments, number of return values).

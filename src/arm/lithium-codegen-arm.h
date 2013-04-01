@@ -87,6 +87,10 @@ class LCodeGen BASE_EMBEDDED {
     return !NeedsEagerFrame() && info()->is_deferred_calling();
   }
 
+  LinkRegisterStatus GetLinkRegisterState() const {
+    return frame_is_built_ ? kLRHasBeenSaved : kLRHasNotBeenSaved;
+  }
+
   // Support for converting LOperands to assembler types.
   // LOperand must be a register.
   Register ToRegister(LOperand* op) const;
@@ -205,7 +209,6 @@ class LCodeGen BASE_EMBEDDED {
                        Register temporary2);
 
   int GetStackSlotCount() const { return chunk()->spill_slot_count(); }
-  int GetParameterCount() const { return info()->num_parameters(); }
 
   void Abort(const char* reason);
   void Comment(const char* format, ...);

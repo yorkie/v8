@@ -69,9 +69,9 @@ class StringsStorage {
   const char* GetCopy(const char* src);
   const char* GetFormatted(const char* format, ...);
   const char* GetVFormatted(const char* format, va_list args);
-  const char* GetName(String* name);
+  const char* GetName(Name* name);
   const char* GetName(int index);
-  inline const char* GetFunctionName(String* name);
+  inline const char* GetFunctionName(Name* name);
   inline const char* GetFunctionName(const char* name);
   size_t GetUsedMemorySize() const;
 
@@ -222,7 +222,6 @@ class CpuProfile {
   INLINE(const char* title() const) { return title_; }
   INLINE(unsigned uid() const) { return uid_; }
   INLINE(const ProfileTree* top_down() const) { return &top_down_; }
-  INLINE(const ProfileTree* bottom_up() const) { return &bottom_up_; }
 
   void UpdateTicksScale();
 
@@ -233,7 +232,6 @@ class CpuProfile {
   const char* title_;
   unsigned uid_;
   ProfileTree top_down_;
-  ProfileTree bottom_up_;
 
   DISALLOW_COPY_AND_ASSIGN(CpuProfile);
 };
@@ -296,7 +294,7 @@ class CpuProfilesCollection {
                             const char* title,
                             double actual_sampling_rate);
   List<CpuProfile*>* Profiles(int security_token_id);
-  const char* GetName(String* name) {
+  const char* GetName(Name* name) {
     return function_and_resource_names_.GetName(name);
   }
   const char* GetName(int args_count) {
@@ -308,10 +306,10 @@ class CpuProfilesCollection {
   bool HasDetachedProfiles() { return detached_profiles_.length() > 0; }
 
   CodeEntry* NewCodeEntry(Logger::LogEventsAndTags tag,
-                          String* name, String* resource_name, int line_number);
+                          Name* name, String* resource_name, int line_number);
   CodeEntry* NewCodeEntry(Logger::LogEventsAndTags tag, const char* name);
   CodeEntry* NewCodeEntry(Logger::LogEventsAndTags tag,
-                          const char* name_prefix, String* name);
+                          const char* name_prefix, Name* name);
   CodeEntry* NewCodeEntry(Logger::LogEventsAndTags tag, int args_count);
   CodeEntry* NewCodeEntry(int security_token_id);
 
@@ -322,7 +320,7 @@ class CpuProfilesCollection {
   static const int kMaxSimultaneousProfiles = 100;
 
  private:
-  const char* GetFunctionName(String* name) {
+  const char* GetFunctionName(Name* name) {
     return function_and_resource_names_.GetFunctionName(name);
   }
   const char* GetFunctionName(const char* name) {
@@ -395,7 +393,7 @@ class ProfileGenerator {
   explicit ProfileGenerator(CpuProfilesCollection* profiles);
 
   INLINE(CodeEntry* NewCodeEntry(Logger::LogEventsAndTags tag,
-                                 String* name,
+                                 Name* name,
                                  String* resource_name,
                                  int line_number)) {
     return profiles_->NewCodeEntry(tag, name, resource_name, line_number);
@@ -408,7 +406,7 @@ class ProfileGenerator {
 
   INLINE(CodeEntry* NewCodeEntry(Logger::LogEventsAndTags tag,
                                  const char* name_prefix,
-                                 String* name)) {
+                                 Name* name)) {
     return profiles_->NewCodeEntry(tag, name_prefix, name);
   }
 

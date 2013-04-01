@@ -61,6 +61,17 @@ void KeyedLoadFastElementStub::InitializeInterfaceDescriptor(
 }
 
 
+void KeyedStoreFastElementStub::InitializeInterfaceDescriptor(
+    Isolate* isolate,
+    CodeStubInterfaceDescriptor* descriptor) {
+  static Register registers[] = { r2, r1, r0 };
+  descriptor->register_param_count_ = 3;
+  descriptor->register_params_ = registers;
+  descriptor->deoptimization_handler_ =
+      FUNCTION_ADDR(KeyedStoreIC_MissFromStubFailure);
+}
+
+
 void TransitionElementsKindStub::InitializeInterfaceDescriptor(
     Isolate* isolate,
     CodeStubInterfaceDescriptor* descriptor) {
@@ -70,6 +81,44 @@ void TransitionElementsKindStub::InitializeInterfaceDescriptor(
   Address entry =
       Runtime::FunctionForId(Runtime::kTransitionElementsKind)->entry;
   descriptor->deoptimization_handler_ = FUNCTION_ADDR(entry);
+}
+
+
+static void InitializeArrayConstructorDescriptor(Isolate* isolate,
+    CodeStubInterfaceDescriptor* descriptor) {
+  // register state
+  // r1 -- constructor function
+  // r2 -- type info cell with elements kind
+  // r0 -- number of arguments to the constructor function
+  static Register registers[] = { r1, r2 };
+  descriptor->register_param_count_ = 2;
+  // stack param count needs (constructor pointer, and single argument)
+  descriptor->stack_parameter_count_ = &r0;
+  descriptor->register_params_ = registers;
+  descriptor->extra_expression_stack_count_ = 1;
+  descriptor->deoptimization_handler_ =
+      FUNCTION_ADDR(ArrayConstructor_StubFailure);
+}
+
+
+void ArrayNoArgumentConstructorStub::InitializeInterfaceDescriptor(
+    Isolate* isolate,
+    CodeStubInterfaceDescriptor* descriptor) {
+  InitializeArrayConstructorDescriptor(isolate, descriptor);
+}
+
+
+void ArraySingleArgumentConstructorStub::InitializeInterfaceDescriptor(
+    Isolate* isolate,
+    CodeStubInterfaceDescriptor* descriptor) {
+  InitializeArrayConstructorDescriptor(isolate, descriptor);
+}
+
+
+void ArrayNArgumentsConstructorStub::InitializeInterfaceDescriptor(
+    Isolate* isolate,
+    CodeStubInterfaceDescriptor* descriptor) {
+  InitializeArrayConstructorDescriptor(isolate, descriptor);
 }
 
 
@@ -128,12 +177,7 @@ void FastNewClosureStub::Generate(MacroAssembler* masm) {
   __ pop(r3);
 
   // Attempt to allocate new JSFunction in new space.
-  __ AllocateInNewSpace(JSFunction::kSize,
-                        r0,
-                        r1,
-                        r2,
-                        &gc,
-                        TAG_OBJECT);
+  __ Allocate(JSFunction::kSize, r0, r1, r2, &gc, TAG_OBJECT);
 
   __ IncrementCounter(counters->fast_new_closure_total(), 1, r6, r7);
 
@@ -260,12 +304,7 @@ void FastNewContextStub::Generate(MacroAssembler* masm) {
   int length = slots_ + Context::MIN_CONTEXT_SLOTS;
 
   // Attempt to allocate the context in new space.
-  __ AllocateInNewSpace(FixedArray::SizeFor(length),
-                        r0,
-                        r1,
-                        r2,
-                        &gc,
-                        TAG_OBJECT);
+  __ Allocate(FixedArray::SizeFor(length), r0, r1, r2, &gc, TAG_OBJECT);
 
   // Load the function from the stack.
   __ ldr(r3, MemOperand(sp, 0));
@@ -310,8 +349,7 @@ void FastNewBlockContextStub::Generate(MacroAssembler* masm) {
   // Try to allocate the context in new space.
   Label gc;
   int length = slots_ + Context::MIN_CONTEXT_SLOTS;
-  __ AllocateInNewSpace(FixedArray::SizeFor(length),
-                        r0, r1, r2, &gc, TAG_OBJECT);
+  __ Allocate(FixedArray::SizeFor(length), r0, r1, r2, &gc, TAG_OBJECT);
 
   // Load the function from the stack.
   __ ldr(r3, MemOperand(sp, 0));
@@ -397,7 +435,7 @@ static void GenerateFastCloneShallowArrayCommon(
   if (mode == FastCloneShallowArrayStub::CLONE_DOUBLE_ELEMENTS) {
     flags = static_cast<AllocationFlags>(DOUBLE_ALIGNMENT | flags);
   }
-  __ AllocateInNewSpace(size, r0, r1, r2, fail, flags);
+  __ Allocate(size, r0, r1, r2, fail, flags);
 
   if (allocation_site_mode == TRACK_ALLOCATION_SITE) {
     __ mov(r2, Operand(Handle<Map>(masm->isolate()->heap()->
@@ -613,7 +651,7 @@ void FloatingPointHelper::LoadSmis(MacroAssembler* masm,
                                    Register scratch1,
                                    Register scratch2) {
   if (CpuFeatures::IsSupported(VFP2)) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     __ mov(scratch1, Operand(r0, ASR, kSmiTagSize));
     __ vmov(d7.high(), scratch1);
     __ vcvt_f64_s32(d7, d7.high());
@@ -664,7 +702,7 @@ void FloatingPointHelper::LoadNumber(MacroAssembler* masm,
   // Handle loading a double from a heap number.
   if (CpuFeatures::IsSupported(VFP2) &&
       destination == kVFPRegisters) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     // Load the double from tagged HeapNumber to double register.
     __ sub(scratch1, object, Operand(kHeapObjectTag));
     __ vldr(dst, scratch1, HeapNumber::kValueOffset);
@@ -678,7 +716,7 @@ void FloatingPointHelper::LoadNumber(MacroAssembler* masm,
   // Handle loading a double from a smi.
   __ bind(&is_smi);
   if (CpuFeatures::IsSupported(VFP2)) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     // Convert smi to double using VFP instructions.
     __ vmov(dst.high(), scratch1);
     __ vcvt_f64_s32(dst, dst.high());
@@ -707,34 +745,21 @@ void FloatingPointHelper::ConvertNumberToInt32(MacroAssembler* masm,
                                                Register scratch1,
                                                Register scratch2,
                                                Register scratch3,
-                                               DwVfpRegister double_scratch,
+                                               DwVfpRegister double_scratch1,
+                                               DwVfpRegister double_scratch2,
                                                Label* not_number) {
+  Label done;
   __ AssertRootValue(heap_number_map,
                      Heap::kHeapNumberMapRootIndex,
                      "HeapNumberMap register clobbered.");
-  Label done;
-  Label not_in_int32_range;
 
   __ UntagAndJumpIfSmi(dst, object, &done);
   __ ldr(scratch1, FieldMemOperand(object, HeapNumber::kMapOffset));
   __ cmp(scratch1, heap_number_map);
   __ b(ne, not_number);
-  __ ConvertToInt32(object,
-                    dst,
-                    scratch1,
-                    scratch2,
-                    double_scratch,
-                    &not_in_int32_range);
-  __ jmp(&done);
-
-  __ bind(&not_in_int32_range);
-  __ ldr(scratch1, FieldMemOperand(object, HeapNumber::kExponentOffset));
-  __ ldr(scratch2, FieldMemOperand(object, HeapNumber::kMantissaOffset));
-
-  __ EmitOutOfInt32RangeTruncate(dst,
-                                 scratch1,
-                                 scratch2,
-                                 scratch3);
+  __ ECMAConvertNumberToInt32(object, dst,
+                              scratch1, scratch2, scratch3,
+                              double_scratch1, double_scratch2);
   __ bind(&done);
 }
 
@@ -754,7 +779,7 @@ void FloatingPointHelper::ConvertIntToDouble(MacroAssembler* masm,
   Label done;
 
   if (CpuFeatures::IsSupported(VFP2)) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     __ vmov(single_scratch, int_scratch);
     __ vcvt_f64_s32(double_dst, single_scratch);
     if (destination == kCoreRegisters) {
@@ -848,18 +873,12 @@ void FloatingPointHelper::LoadNumberAsInt32Double(MacroAssembler* masm,
 
   // Load the number.
   if (CpuFeatures::IsSupported(VFP2)) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     // Load the double value.
     __ sub(scratch1, object, Operand(kHeapObjectTag));
     __ vldr(double_dst, scratch1, HeapNumber::kValueOffset);
 
-    __ EmitVFPTruncate(kRoundToZero,
-                       scratch1,
-                       double_dst,
-                       scratch2,
-                       double_scratch,
-                       kCheckForInexactConversion);
-
+    __ TestDoubleIsInt32(double_dst, double_scratch);
     // Jump to not_int32 if the operation did not succeed.
     __ b(ne, not_int32);
 
@@ -945,19 +964,13 @@ void FloatingPointHelper::LoadNumberAsInt32(MacroAssembler* masm,
   // Object is a heap number.
   // Convert the floating point value to a 32-bit integer.
   if (CpuFeatures::IsSupported(VFP2)) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
 
     // Load the double value.
     __ sub(scratch1, object, Operand(kHeapObjectTag));
     __ vldr(double_scratch0, scratch1, HeapNumber::kValueOffset);
 
-    __ EmitVFPTruncate(kRoundToZero,
-                       dst,
-                       double_scratch0,
-                       scratch1,
-                       double_scratch1,
-                       kCheckForInexactConversion);
-
+    __ TryDoubleToInt32Exact(dst, double_scratch0, double_scratch1);
     // Jump to not_int32 if the operation did not succeed.
     __ b(ne, not_int32);
   } else {
@@ -1080,7 +1093,7 @@ void FloatingPointHelper::CallCCodeForDoubleOperation(
   __ push(lr);
   __ PrepareCallCFunction(0, 2, scratch);
   if (masm->use_eabi_hardfloat()) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     __ vmov(d0, r0, r1);
     __ vmov(d1, r2, r3);
   }
@@ -1092,7 +1105,7 @@ void FloatingPointHelper::CallCCodeForDoubleOperation(
   // Store answer in the overwritable heap number. Double returned in
   // registers r0 and r1 or in d0.
   if (masm->use_eabi_hardfloat()) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     __ vstr(d0,
             FieldMemOperand(heap_number_result, HeapNumber::kValueOffset));
   } else {
@@ -1307,7 +1320,7 @@ static void EmitSmiNonsmiComparison(MacroAssembler* masm,
   // Lhs is a smi, rhs is a number.
   if (CpuFeatures::IsSupported(VFP2)) {
     // Convert lhs to a double in d7.
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     __ SmiToDoubleVFPRegister(lhs, d7, r7, s15);
     // Load the double from rhs, tagged HeapNumber r0, to d6.
     __ sub(r7, rhs, Operand(kHeapObjectTag));
@@ -1346,7 +1359,7 @@ static void EmitSmiNonsmiComparison(MacroAssembler* masm,
 
   // Rhs is a smi, lhs is a heap number.
   if (CpuFeatures::IsSupported(VFP2)) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     // Load the double from lhs, tagged HeapNumber r1, to d7.
     __ sub(r7, lhs, Operand(kHeapObjectTag));
     __ vldr(d7, r7, HeapNumber::kValueOffset);
@@ -1458,7 +1471,7 @@ static void EmitTwoNonNanDoubleComparison(MacroAssembler* masm,
     __ push(lr);
     __ PrepareCallCFunction(0, 2, r5);
     if (masm->use_eabi_hardfloat()) {
-      CpuFeatures::Scope scope(VFP2);
+      CpuFeatureScope scope(masm, VFP2);
       __ vmov(d0, r0, r1);
       __ vmov(d1, r2, r3);
     }
@@ -1535,7 +1548,7 @@ static void EmitCheckForTwoHeapNumbers(MacroAssembler* masm,
   // Both are heap numbers.  Load them up then jump to the code we have
   // for that.
   if (CpuFeatures::IsSupported(VFP2)) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     __ sub(r7, rhs, Operand(kHeapObjectTag));
     __ vldr(d6, r7, HeapNumber::kValueOffset);
     __ sub(r7, lhs, Operand(kHeapObjectTag));
@@ -1625,7 +1638,7 @@ void NumberToStringStub::GenerateLookupNumberStringCache(MacroAssembler* masm,
   if (!object_is_smi) {
     __ JumpIfSmi(object, &is_smi);
     if (CpuFeatures::IsSupported(VFP2)) {
-      CpuFeatures::Scope scope(VFP2);
+      CpuFeatureScope scope(masm, VFP2);
       __ CheckMap(object,
                   scratch1,
                   Heap::kHeapNumberMapRootIndex,
@@ -1776,7 +1789,7 @@ void ICCompareStub::GenerateGeneric(MacroAssembler* masm) {
   Isolate* isolate = masm->isolate();
   if (CpuFeatures::IsSupported(VFP2)) {
     __ bind(&lhs_not_nan);
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     Label no_nan;
     // ARMv7 VFP3 instructions to implement double precision comparison.
     __ VFPCompareAndSetFlags(d7, d6);
@@ -1956,7 +1969,7 @@ void ToBooleanStub::Generate(MacroAssembler* masm) {
     __ b(ne, &not_heap_number);
 
     if (CpuFeatures::IsSupported(VFP2)) {
-      CpuFeatures::Scope scope(VFP2);
+      CpuFeatureScope scope(masm, VFP2);
 
       __ vldr(d1, FieldMemOperand(tos_, HeapNumber::kValueOffset));
       __ VFPCompareAndSetFlags(d1, 0.0);
@@ -2056,7 +2069,7 @@ void StoreBufferOverflowStub::Generate(MacroAssembler* masm) {
   const Register scratch = r1;
 
   if (save_doubles_ == kSaveFPRegs) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     // Check CPU flags for number of registers, setting the Z condition flag.
     __ CheckFor32DRegs(scratch);
 
@@ -2076,7 +2089,7 @@ void StoreBufferOverflowStub::Generate(MacroAssembler* masm) {
       ExternalReference::store_buffer_overflow_function(masm->isolate()),
       argument_count);
   if (save_doubles_ == kSaveFPRegs) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
 
     // Check CPU flags for number of registers, setting the Z condition flag.
     __ CheckFor32DRegs(scratch);
@@ -2264,18 +2277,16 @@ void UnaryOpStub::GenerateHeapNumberCodeSub(MacroAssembler* masm,
 }
 
 
-void UnaryOpStub::GenerateHeapNumberCodeBitNot(
-    MacroAssembler* masm, Label* slow) {
-  Label impossible;
-
+void UnaryOpStub::GenerateHeapNumberCodeBitNot(MacroAssembler* masm,
+                                               Label* slow) {
   EmitCheckForHeapNumber(masm, r0, r1, r6, slow);
-  // Convert the heap number is r0 to an untagged integer in r1.
-  __ ConvertToInt32(r0, r1, r2, r3, d0, slow);
+  // Convert the heap number in r0 to an untagged integer in r1.
+  __ ECMAConvertNumberToInt32(r0, r1, r2, r3, r4, d0, d1);
 
   // Do the bitwise operation and check if the result fits in a smi.
   Label try_float;
   __ mvn(r1, Operand(r1));
-  __ add(r2, r1, Operand(0x40000000), SetCC);
+  __ cmn(r1, Operand(0x40000000));
   __ b(mi, &try_float);
 
   // Tag the result as a smi and we're done.
@@ -2286,48 +2297,36 @@ void UnaryOpStub::GenerateHeapNumberCodeBitNot(
   __ bind(&try_float);
   if (mode_ == UNARY_NO_OVERWRITE) {
     Label slow_allocate_heapnumber, heapnumber_allocated;
-    // Allocate a new heap number without zapping r0, which we need if it fails.
-    __ AllocateHeapNumber(r2, r3, r4, r6, &slow_allocate_heapnumber);
+    __ AllocateHeapNumber(r0, r3, r4, r6, &slow_allocate_heapnumber);
     __ jmp(&heapnumber_allocated);
 
     __ bind(&slow_allocate_heapnumber);
     {
       FrameScope scope(masm, StackFrame::INTERNAL);
-      __ push(r0);  // Push the heap number, not the untagged int32.
+      // Push the lower bit of the result (left shifted to look like a smi).
+      __ mov(r2, Operand(r1, LSL, 31));
+      // Push the 31 high bits (bit 0 cleared to look like a smi).
+      __ bic(r1, r1, Operand(1));
+      __ Push(r2, r1);
       __ CallRuntime(Runtime::kNumberAlloc, 0);
-      __ mov(r2, r0);  // Move the new heap number into r2.
-      // Get the heap number into r0, now that the new heap number is in r2.
-      __ pop(r0);
+      __ Pop(r2, r1);  // Restore the result.
+      __ orr(r1, r1, Operand(r2, LSR, 31));
     }
-
-    // Convert the heap number in r0 to an untagged integer in r1.
-    // This can't go slow-case because it's the same number we already
-    // converted once again.
-    __ ConvertToInt32(r0, r1, r3, r4, d0, &impossible);
-    __ mvn(r1, Operand(r1));
-
     __ bind(&heapnumber_allocated);
-    __ mov(r0, r2);  // Move newly allocated heap number to r0.
   }
 
   if (CpuFeatures::IsSupported(VFP2)) {
     // Convert the int32 in r1 to the heap number in r0. r2 is corrupted.
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     __ vmov(s0, r1);
     __ vcvt_f64_s32(d0, s0);
-    __ sub(r2, r0, Operand(kHeapObjectTag));
-    __ vstr(d0, r2, HeapNumber::kValueOffset);
+    __ vstr(d0, FieldMemOperand(r0, HeapNumber::kValueOffset));
     __ Ret();
   } else {
     // WriteInt32ToHeapNumberStub does not trigger GC, so we do not
     // have to set up a frame.
     WriteInt32ToHeapNumberStub stub(r1, r0, r2);
     __ Jump(stub.GetCode(masm->isolate()), RelocInfo::CODE_TARGET);
-  }
-
-  __ bind(&impossible);
-  if (FLAG_debug_code) {
-    __ stop("Incorrect assumption in bit-not stub");
   }
 }
 
@@ -2707,7 +2706,7 @@ void BinaryOpStub_GenerateFPOperation(MacroAssembler* masm,
         // Using VFP registers:
         // d6: Left value
         // d7: Right value
-        CpuFeatures::Scope scope(VFP2);
+        CpuFeatureScope scope(masm, VFP2);
         switch (op) {
           case Token::ADD:
             __ vadd(d5, d6, d7);
@@ -2760,6 +2759,7 @@ void BinaryOpStub_GenerateFPOperation(MacroAssembler* masm,
                                                   scratch2,
                                                   scratch3,
                                                   d0,
+                                                  d1,
                                                   not_numbers);
         FloatingPointHelper::ConvertNumberToInt32(masm,
                                                   right,
@@ -2769,6 +2769,7 @@ void BinaryOpStub_GenerateFPOperation(MacroAssembler* masm,
                                                   scratch2,
                                                   scratch3,
                                                   d0,
+                                                  d1,
                                                   not_numbers);
       }
 
@@ -2839,7 +2840,7 @@ void BinaryOpStub_GenerateFPOperation(MacroAssembler* masm,
       if (CpuFeatures::IsSupported(VFP2)) {
         // Convert the int32 in r2 to the heap number in r0. r3 is corrupted. As
         // mentioned above SHR needs to always produce a positive result.
-        CpuFeatures::Scope scope(VFP2);
+        CpuFeatureScope scope(masm, VFP2);
         __ vmov(s0, r2);
         if (op == Token::SHR) {
           __ vcvt_f64_u32(d0, s0);
@@ -3031,7 +3032,7 @@ void BinaryOpStub::GenerateInt32Stub(MacroAssembler* masm) {
                                                    &transition);
 
       if (destination == FloatingPointHelper::kVFPRegisters) {
-        CpuFeatures::Scope scope(VFP2);
+        CpuFeatureScope scope(masm, VFP2);
         Label return_heap_number;
         switch (op_) {
           case Token::ADD:
@@ -3056,16 +3057,14 @@ void BinaryOpStub::GenerateInt32Stub(MacroAssembler* masm) {
           // Otherwise return a heap number if allowed, or jump to type
           // transition.
 
-          __ EmitVFPTruncate(kRoundToZero,
-                             scratch1,
-                             d5,
-                             scratch2,
-                             d8);
-
           if (result_type_ <= BinaryOpIC::INT32) {
+            __ TryDoubleToInt32Exact(scratch1, d5, d8);
             // If the ne condition is set, result does
             // not fit in a 32-bit integer.
             __ b(ne, &transition);
+          } else {
+            __ vcvt_s32_f64(s8, d5);
+            __ vmov(scratch1, s8);
           }
 
           // Check if the result fits in a smi.
@@ -3240,7 +3239,7 @@ void BinaryOpStub::GenerateInt32Stub(MacroAssembler* masm) {
                                                 mode_);
 
       if (CpuFeatures::IsSupported(VFP2)) {
-        CpuFeatures::Scope scope(VFP2);
+        CpuFeatureScope scope(masm, VFP2);
         if (op_ != Token::SHR) {
           // Convert the result to a floating point value.
           __ vmov(double_scratch.low(), r2);
@@ -3443,7 +3442,7 @@ void TranscendentalCacheStub::Generate(MacroAssembler* masm) {
   const bool tagged = (argument_type_ == TAGGED);
 
   if (CpuFeatures::IsSupported(VFP2)) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     if (tagged) {
       // Argument is a number and is on stack and in r0.
       // Load argument and check if it is a smi.
@@ -3545,7 +3544,7 @@ void TranscendentalCacheStub::Generate(MacroAssembler* masm) {
     __ TailCallExternalReference(runtime_function, 1, 1);
   } else {
     ASSERT(CpuFeatures::IsSupported(VFP2));
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
 
     Label no_update;
     Label skip_cache;
@@ -3606,7 +3605,7 @@ void TranscendentalCacheStub::Generate(MacroAssembler* masm) {
 
 void TranscendentalCacheStub::GenerateCallCFunction(MacroAssembler* masm,
                                                     Register scratch) {
-  ASSERT(CpuFeatures::IsEnabled(VFP2));
+  ASSERT(masm->IsEnabled(VFP2));
   Isolate* isolate = masm->isolate();
 
   __ push(lr);
@@ -3667,7 +3666,7 @@ void InterruptStub::Generate(MacroAssembler* masm) {
 
 
 void MathPowStub::Generate(MacroAssembler* masm) {
-  CpuFeatures::Scope vfp2_scope(VFP2);
+  CpuFeatureScope vfp2_scope(masm, VFP2);
   const Register base = r1;
   const Register exponent = r2;
   const Register heapnumbermap = r5;
@@ -3893,21 +3892,15 @@ void CodeStub::GenerateFPStubs(Isolate* isolate) {
   // These stubs might already be in the snapshot, detect that and don't
   // regenerate, which would lead to code stub initialization state being messed
   // up.
-  Code* save_doubles_code = NULL;
-  Code* store_buffer_overflow_code = NULL;
-  if (!save_doubles.FindCodeInCache(&save_doubles_code, ISOLATE)) {
-    if (CpuFeatures::IsSupported(VFP2)) {
-      CpuFeatures::Scope scope2(VFP2);
-      save_doubles_code = *save_doubles.GetCode(isolate);
-      store_buffer_overflow_code = *stub.GetCode(isolate);
-    } else {
-      save_doubles_code = *save_doubles.GetCode(isolate);
-      store_buffer_overflow_code = *stub.GetCode(isolate);
-    }
+  Code* save_doubles_code;
+  if (!save_doubles.FindCodeInCache(&save_doubles_code, isolate)) {
+    save_doubles_code = *save_doubles.GetCode(isolate);
     save_doubles_code->set_is_pregenerated(true);
+
+    Code* store_buffer_overflow_code = *stub.GetCode(isolate);
     store_buffer_overflow_code->set_is_pregenerated(true);
   }
-  ISOLATE->set_fp_stubs_generated(true);
+  isolate->set_fp_stubs_generated(true);
 }
 
 
@@ -4154,7 +4147,7 @@ void JSEntryStub::GenerateBody(MacroAssembler* masm, bool is_construct) {
   __ stm(db_w, sp, kCalleeSaved | lr.bit());
 
   if (CpuFeatures::IsSupported(VFP2)) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     // Save callee-saved vfp registers.
     __ vstm(db_w, sp, kFirstCalleeSavedDoubleReg, kLastCalleeSavedDoubleReg);
     // Set up the reserved register for 0.0.
@@ -4308,7 +4301,7 @@ void JSEntryStub::GenerateBody(MacroAssembler* masm, bool is_construct) {
 #endif
 
   if (CpuFeatures::IsSupported(VFP2)) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
     // Restore callee-saved vfp registers.
     __ vldm(ia_w, sp, kFirstCalleeSavedDoubleReg, kLastCalleeSavedDoubleReg);
   }
@@ -4495,35 +4488,6 @@ void InstanceofStub::Generate(MacroAssembler* masm) {
 }
 
 
-void ArrayLengthStub::Generate(MacroAssembler* masm) {
-  Label miss;
-  Register receiver;
-  if (kind() == Code::KEYED_LOAD_IC) {
-    // ----------- S t a t e -------------
-    //  -- lr    : return address
-    //  -- r0    : key
-    //  -- r1    : receiver
-    // -----------------------------------
-    __ cmp(r0, Operand(masm->isolate()->factory()->length_string()));
-    __ b(ne, &miss);
-    receiver = r1;
-  } else {
-    ASSERT(kind() == Code::LOAD_IC);
-    // ----------- S t a t e -------------
-    //  -- r2    : name
-    //  -- lr    : return address
-    //  -- r0    : receiver
-    //  -- sp[0] : receiver
-    // -----------------------------------
-    receiver = r0;
-  }
-
-  StubCompiler::GenerateLoadArrayLength(masm, receiver, r3, &miss);
-  __ bind(&miss);
-  StubCompiler::GenerateLoadMiss(masm, kind());
-}
-
-
 void FunctionPrototypeStub::Generate(MacroAssembler* masm) {
   Label miss;
   Register receiver;
@@ -4549,7 +4513,7 @@ void FunctionPrototypeStub::Generate(MacroAssembler* masm) {
 
   StubCompiler::GenerateLoadFunctionPrototype(masm, receiver, r3, r4, &miss);
   __ bind(&miss);
-  StubCompiler::GenerateLoadMiss(masm, kind());
+  StubCompiler::TailCallBuiltin(masm, StubCompiler::MissBuiltin(kind()));
 }
 
 
@@ -4580,7 +4544,7 @@ void StringLengthStub::Generate(MacroAssembler* masm) {
                                          support_wrapper_);
 
   __ bind(&miss);
-  StubCompiler::GenerateLoadMiss(masm, kind());
+  StubCompiler::TailCallBuiltin(masm, StubCompiler::MissBuiltin(kind()));
 }
 
 
@@ -4650,7 +4614,7 @@ void StoreArrayLengthStub::Generate(MacroAssembler* masm) {
 
   __ bind(&miss);
 
-  StubCompiler::GenerateStoreMiss(masm, kind());
+  StubCompiler::TailCallBuiltin(masm, StubCompiler::MissBuiltin(kind()));
 }
 
 
@@ -4658,6 +4622,12 @@ Register InstanceofStub::left() { return r0; }
 
 
 Register InstanceofStub::right() { return r1; }
+
+
+void LoadFieldStub::Generate(MacroAssembler* masm) {
+  StubCompiler::DoGenerateFastPropertyLoad(masm, r0, reg_, inobject_, index_);
+  __ Ret();
+}
 
 
 void ArgumentsAccessStub::GenerateReadElement(MacroAssembler* masm) {
@@ -4792,7 +4762,7 @@ void ArgumentsAccessStub::GenerateNewNonStrictFast(MacroAssembler* masm) {
   __ add(r9, r9, Operand(Heap::kArgumentsObjectSize));
 
   // Do the allocation of all three objects in one go.
-  __ AllocateInNewSpace(r9, r0, r3, r4, &runtime, TAG_OBJECT);
+  __ Allocate(r9, r0, r3, r4, &runtime, TAG_OBJECT);
 
   // r0 = address of new object(s) (tagged)
   // r2 = argument count (tagged)
@@ -4968,13 +4938,8 @@ void ArgumentsAccessStub::GenerateNewStrict(MacroAssembler* masm) {
   __ add(r1, r1, Operand(Heap::kArgumentsObjectSizeStrict / kPointerSize));
 
   // Do the allocation of both objects in one go.
-  __ AllocateInNewSpace(r1,
-                        r0,
-                        r2,
-                        r3,
-                        &runtime,
-                        static_cast<AllocationFlags>(TAG_OBJECT |
-                                                     SIZE_IN_WORDS));
+  __ Allocate(r1, r0, r2, r3, &runtime,
+              static_cast<AllocationFlags>(TAG_OBJECT | SIZE_IN_WORDS));
 
   // Get the arguments boilerplate from the current native context.
   __ ldr(r4, MemOperand(cp, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
@@ -5478,7 +5443,7 @@ void RegExpConstructResultStub::Generate(MacroAssembler* masm) {
       (JSRegExpResult::kSize + FixedArray::kHeaderSize) / kPointerSize;
   __ mov(r5, Operand(r1, LSR, kSmiTagSize + kSmiShiftSize));
   __ add(r2, r5, Operand(objects_size));
-  __ AllocateInNewSpace(
+  __ Allocate(
       r2,  // In: Size, in words.
       r0,  // Out: Start of allocation (tagged).
       r3,  // Scratch register.
@@ -5546,12 +5511,13 @@ void RegExpConstructResultStub::Generate(MacroAssembler* masm) {
 }
 
 
-static void GenerateRecordCallTarget(MacroAssembler* masm) {
+static void GenerateRecordCallTargetNoArray(MacroAssembler* masm) {
   // Cache the called function in a global property cell.  Cache states
   // are uninitialized, monomorphic (indicated by a JSFunction), and
   // megamorphic.
   // r1 : the function to call
   // r2 : cache cell for call target
+  ASSERT(!FLAG_optimize_constructed_arrays);
   Label done;
 
   ASSERT_EQ(*TypeFeedbackCells::MegamorphicSentinel(masm->isolate()),
@@ -5579,6 +5545,82 @@ static void GenerateRecordCallTarget(MacroAssembler* masm) {
 
   // An uninitialized cache is patched with the function.
   __ str(r1, FieldMemOperand(r2, JSGlobalPropertyCell::kValueOffset), eq);
+  // No need for a write barrier here - cells are rescanned.
+
+  __ bind(&done);
+}
+
+
+static void GenerateRecordCallTarget(MacroAssembler* masm) {
+  // Cache the called function in a global property cell.  Cache states
+  // are uninitialized, monomorphic (indicated by a JSFunction), and
+  // megamorphic.
+  // r1 : the function to call
+  // r2 : cache cell for call target
+  ASSERT(FLAG_optimize_constructed_arrays);
+  Label initialize, done, miss, megamorphic, not_array_function;
+
+  ASSERT_EQ(*TypeFeedbackCells::MegamorphicSentinel(masm->isolate()),
+            masm->isolate()->heap()->undefined_value());
+  ASSERT_EQ(*TypeFeedbackCells::UninitializedSentinel(masm->isolate()),
+            masm->isolate()->heap()->the_hole_value());
+
+  // Load the cache state into r3.
+  __ ldr(r3, FieldMemOperand(r2, JSGlobalPropertyCell::kValueOffset));
+
+  // A monomorphic cache hit or an already megamorphic state: invoke the
+  // function without changing the state.
+  __ cmp(r3, r1);
+  __ b(eq, &done);
+  __ CompareRoot(r3, Heap::kUndefinedValueRootIndex);
+  __ b(eq, &done);
+
+  // Special handling of the Array() function, which caches not only the
+  // monomorphic Array function but the initial ElementsKind with special
+  // sentinels
+  Handle<Object> terminal_kind_sentinel =
+      TypeFeedbackCells::MonomorphicArraySentinel(masm->isolate(),
+                                                  LAST_FAST_ELEMENTS_KIND);
+  __ cmp(r3, Operand(terminal_kind_sentinel));
+  __ b(ne, &miss);
+  // Make sure the function is the Array() function
+  __ LoadArrayFunction(r3);
+  __ cmp(r1, r3);
+  __ b(ne, &megamorphic);
+  __ jmp(&done);
+
+  __ bind(&miss);
+
+  // A monomorphic miss (i.e, here the cache is not uninitialized) goes
+  // megamorphic.
+  __ CompareRoot(r3, Heap::kTheHoleValueRootIndex);
+  __ b(eq, &initialize);
+  // MegamorphicSentinel is an immortal immovable object (undefined) so no
+  // write-barrier is needed.
+  __ bind(&megamorphic);
+  __ LoadRoot(ip, Heap::kUndefinedValueRootIndex);
+  __ str(ip, FieldMemOperand(r2, JSGlobalPropertyCell::kValueOffset));
+
+  // An uninitialized cache is patched with the function or sentinel to
+  // indicate the ElementsKind if function is the Array constructor.
+  __ bind(&initialize);
+  // Make sure the function is the Array() function
+  __ LoadArrayFunction(r3);
+  __ cmp(r1, r3);
+  __ b(ne, &not_array_function);
+
+  // The target function is the Array constructor, install a sentinel value in
+  // the constructor's type info cell that will track the initial ElementsKind
+  // that should be used for the array when its constructed.
+  Handle<Object> initial_kind_sentinel =
+      TypeFeedbackCells::MonomorphicArraySentinel(masm->isolate(),
+          GetInitialFastElementsKind());
+  __ mov(r3, Operand(initial_kind_sentinel));
+  __ str(r3, FieldMemOperand(r2, JSGlobalPropertyCell::kValueOffset));
+  __ b(&done);
+
+  __ bind(&not_array_function);
+  __ str(r1, FieldMemOperand(r2, JSGlobalPropertyCell::kValueOffset));
   // No need for a write barrier here - cells are rescanned.
 
   __ bind(&done);
@@ -5617,7 +5659,11 @@ void CallFunctionStub::Generate(MacroAssembler* masm) {
   __ b(ne, &slow);
 
   if (RecordCallTarget()) {
-    GenerateRecordCallTarget(masm);
+    if (FLAG_optimize_constructed_arrays) {
+      GenerateRecordCallTarget(masm);
+    } else {
+      GenerateRecordCallTargetNoArray(masm);
+    }
   }
 
   // Fast-case: Invoke the function now.
@@ -5692,13 +5738,19 @@ void CallConstructStub::Generate(MacroAssembler* masm) {
   __ b(ne, &slow);
 
   if (RecordCallTarget()) {
-    GenerateRecordCallTarget(masm);
+    if (FLAG_optimize_constructed_arrays) {
+      GenerateRecordCallTarget(masm);
+    } else {
+      GenerateRecordCallTargetNoArray(masm);
+    }
   }
 
   // Jump to the function-specific construct stub.
-  __ ldr(r2, FieldMemOperand(r1, JSFunction::kSharedFunctionInfoOffset));
-  __ ldr(r2, FieldMemOperand(r2, SharedFunctionInfo::kConstructStubOffset));
-  __ add(pc, r2, Operand(Code::kHeaderSize - kHeapObjectTag));
+  Register jmp_reg = FLAG_optimize_constructed_arrays ? r3 : r2;
+  __ ldr(jmp_reg, FieldMemOperand(r1, JSFunction::kSharedFunctionInfoOffset));
+  __ ldr(jmp_reg, FieldMemOperand(jmp_reg,
+                                  SharedFunctionInfo::kConstructStubOffset));
+  __ add(pc, jmp_reg, Operand(Code::kHeaderSize - kHeapObjectTag));
 
   // r0: number of arguments
   // r1: called object
@@ -6959,7 +7011,7 @@ void ICCompareStub::GenerateNumbers(MacroAssembler* masm) {
   // Inlining the double comparison and falling back to the general compare
   // stub if NaN is involved or VFP2 is unsupported.
   if (CpuFeatures::IsSupported(VFP2)) {
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm, VFP2);
 
     // Load left and right operand.
     Label done, left, left_smi, right_smi;
@@ -7053,6 +7105,57 @@ void ICCompareStub::GenerateInternalizedStrings(MacroAssembler* masm) {
   __ b(eq, &miss);
 
   // Internalized strings are compared by identity.
+  __ cmp(left, right);
+  // Make sure r0 is non-zero. At this point input operands are
+  // guaranteed to be non-zero.
+  ASSERT(right.is(r0));
+  STATIC_ASSERT(EQUAL == 0);
+  STATIC_ASSERT(kSmiTag == 0);
+  __ mov(r0, Operand(Smi::FromInt(EQUAL)), LeaveCC, eq);
+  __ Ret();
+
+  __ bind(&miss);
+  GenerateMiss(masm);
+}
+
+
+void ICCompareStub::GenerateUniqueNames(MacroAssembler* masm) {
+  ASSERT(state_ == CompareIC::UNIQUE_NAME);
+  ASSERT(GetCondition() == eq);
+  Label miss;
+
+  // Registers containing left and right operands respectively.
+  Register left = r1;
+  Register right = r0;
+  Register tmp1 = r2;
+  Register tmp2 = r3;
+
+  // Check that both operands are heap objects.
+  __ JumpIfEitherSmi(left, right, &miss);
+
+  // Check that both operands are unique names. This leaves the instance
+  // types loaded in tmp1 and tmp2.
+  STATIC_ASSERT(kInternalizedTag != 0);
+  __ ldr(tmp1, FieldMemOperand(left, HeapObject::kMapOffset));
+  __ ldr(tmp2, FieldMemOperand(right, HeapObject::kMapOffset));
+  __ ldrb(tmp1, FieldMemOperand(tmp1, Map::kInstanceTypeOffset));
+  __ ldrb(tmp2, FieldMemOperand(tmp2, Map::kInstanceTypeOffset));
+
+  Label succeed1;
+  __ tst(tmp1, Operand(kIsInternalizedMask));
+  __ b(ne, &succeed1);
+  __ cmp(tmp1, Operand(SYMBOL_TYPE));
+  __ b(ne, &miss);
+  __ bind(&succeed1);
+
+  Label succeed2;
+  __ tst(tmp2, Operand(kIsInternalizedMask));
+  __ b(ne, &succeed2);
+  __ cmp(tmp2, Operand(SYMBOL_TYPE));
+  __ b(ne, &miss);
+  __ bind(&succeed2);
+
+  // Unique names are compared by identity.
   __ cmp(left, right);
   // Make sure r0 is non-zero. At this point input operands are
   // guaranteed to be non-zero.
@@ -7243,13 +7346,14 @@ void DirectCEntryStub::GenerateCall(MacroAssembler* masm,
 }
 
 
-void StringDictionaryLookupStub::GenerateNegativeLookup(MacroAssembler* masm,
-                                                        Label* miss,
-                                                        Label* done,
-                                                        Register receiver,
-                                                        Register properties,
-                                                        Handle<String> name,
-                                                        Register scratch0) {
+void NameDictionaryLookupStub::GenerateNegativeLookup(MacroAssembler* masm,
+                                                      Label* miss,
+                                                      Label* done,
+                                                      Register receiver,
+                                                      Register properties,
+                                                      Handle<Name> name,
+                                                      Register scratch0) {
+  ASSERT(name->IsUniqueName());
   // If names of slots in range from 1 to kProbes - 1 for the hash value are
   // not equal to the name and kProbes-th slot is not used (its name is the
   // undefined value), it guarantees the hash table doesn't contain the
@@ -7263,10 +7367,10 @@ void StringDictionaryLookupStub::GenerateNegativeLookup(MacroAssembler* masm,
     __ ldr(index, FieldMemOperand(properties, kCapacityOffset));
     __ sub(index, index, Operand(1));
     __ and_(index, index, Operand(
-        Smi::FromInt(name->Hash() + StringDictionary::GetProbeOffset(i))));
+        Smi::FromInt(name->Hash() + NameDictionary::GetProbeOffset(i))));
 
     // Scale the index by multiplying by the entry size.
-    ASSERT(StringDictionary::kEntrySize == 3);
+    ASSERT(NameDictionary::kEntrySize == 3);
     __ add(index, index, Operand(index, LSL, 1));  // index *= 3.
 
     Register entity_name = scratch0;
@@ -7281,31 +7385,31 @@ void StringDictionaryLookupStub::GenerateNegativeLookup(MacroAssembler* masm,
     __ cmp(entity_name, tmp);
     __ b(eq, done);
 
-    if (i != kInlinedProbes - 1) {
-      // Load the hole ready for use below:
-      __ LoadRoot(tmp, Heap::kTheHoleValueRootIndex);
+    // Load the hole ready for use below:
+    __ LoadRoot(tmp, Heap::kTheHoleValueRootIndex);
 
-      // Stop if found the property.
-      __ cmp(entity_name, Operand(Handle<String>(name)));
-      __ b(eq, miss);
+    // Stop if found the property.
+    __ cmp(entity_name, Operand(Handle<Name>(name)));
+    __ b(eq, miss);
 
-      Label the_hole;
-      __ cmp(entity_name, tmp);
-      __ b(eq, &the_hole);
+    Label good;
+    __ cmp(entity_name, tmp);
+    __ b(eq, &good);
 
-      // Check if the entry name is not an internalized string.
-      __ ldr(entity_name, FieldMemOperand(entity_name, HeapObject::kMapOffset));
-      __ ldrb(entity_name,
-              FieldMemOperand(entity_name, Map::kInstanceTypeOffset));
-      __ tst(entity_name, Operand(kIsInternalizedMask));
-      __ b(eq, miss);
+    // Check if the entry name is not a unique name.
+    __ ldr(entity_name, FieldMemOperand(entity_name, HeapObject::kMapOffset));
+    __ ldrb(entity_name,
+            FieldMemOperand(entity_name, Map::kInstanceTypeOffset));
+    __ tst(entity_name, Operand(kIsInternalizedMask));
+    __ b(ne, &good);
+    __ cmp(entity_name, Operand(SYMBOL_TYPE));
+    __ b(ne, miss);
 
-      __ bind(&the_hole);
+    __ bind(&good);
 
-      // Restore the properties.
-      __ ldr(properties,
-             FieldMemOperand(receiver, JSObject::kPropertiesOffset));
-    }
+    // Restore the properties.
+    __ ldr(properties,
+           FieldMemOperand(receiver, JSObject::kPropertiesOffset));
   }
 
   const int spill_mask =
@@ -7314,8 +7418,8 @@ void StringDictionaryLookupStub::GenerateNegativeLookup(MacroAssembler* masm,
 
   __ stm(db_w, sp, spill_mask);
   __ ldr(r0, FieldMemOperand(receiver, JSObject::kPropertiesOffset));
-  __ mov(r1, Operand(Handle<String>(name)));
-  StringDictionaryLookupStub stub(NEGATIVE_LOOKUP);
+  __ mov(r1, Operand(Handle<Name>(name)));
+  NameDictionaryLookupStub stub(NEGATIVE_LOOKUP);
   __ CallStub(&stub);
   __ cmp(r0, Operand::Zero());
   __ ldm(ia_w, sp, spill_mask);
@@ -7325,23 +7429,23 @@ void StringDictionaryLookupStub::GenerateNegativeLookup(MacroAssembler* masm,
 }
 
 
-// Probe the string dictionary in the |elements| register. Jump to the
+// Probe the name dictionary in the |elements| register. Jump to the
 // |done| label if a property with the given name is found. Jump to
 // the |miss| label otherwise.
 // If lookup was successful |scratch2| will be equal to elements + 4 * index.
-void StringDictionaryLookupStub::GeneratePositiveLookup(MacroAssembler* masm,
-                                                        Label* miss,
-                                                        Label* done,
-                                                        Register elements,
-                                                        Register name,
-                                                        Register scratch1,
-                                                        Register scratch2) {
+void NameDictionaryLookupStub::GeneratePositiveLookup(MacroAssembler* masm,
+                                                      Label* miss,
+                                                      Label* done,
+                                                      Register elements,
+                                                      Register name,
+                                                      Register scratch1,
+                                                      Register scratch2) {
   ASSERT(!elements.is(scratch1));
   ASSERT(!elements.is(scratch2));
   ASSERT(!name.is(scratch1));
   ASSERT(!name.is(scratch2));
 
-  __ AssertString(name);
+  __ AssertName(name);
 
   // Compute the capacity mask.
   __ ldr(scratch1, FieldMemOperand(elements, kCapacityOffset));
@@ -7353,20 +7457,20 @@ void StringDictionaryLookupStub::GeneratePositiveLookup(MacroAssembler* masm,
   // cover ~93% of loads from dictionaries.
   for (int i = 0; i < kInlinedProbes; i++) {
     // Compute the masked index: (hash + i + i * i) & mask.
-    __ ldr(scratch2, FieldMemOperand(name, String::kHashFieldOffset));
+    __ ldr(scratch2, FieldMemOperand(name, Name::kHashFieldOffset));
     if (i > 0) {
       // Add the probe offset (i + i * i) left shifted to avoid right shifting
       // the hash in a separate instruction. The value hash + i + i * i is right
       // shifted in the following and instruction.
-      ASSERT(StringDictionary::GetProbeOffset(i) <
-             1 << (32 - String::kHashFieldOffset));
+      ASSERT(NameDictionary::GetProbeOffset(i) <
+             1 << (32 - Name::kHashFieldOffset));
       __ add(scratch2, scratch2, Operand(
-          StringDictionary::GetProbeOffset(i) << String::kHashShift));
+          NameDictionary::GetProbeOffset(i) << Name::kHashShift));
     }
-    __ and_(scratch2, scratch1, Operand(scratch2, LSR, String::kHashShift));
+    __ and_(scratch2, scratch1, Operand(scratch2, LSR, Name::kHashShift));
 
     // Scale the index by multiplying by the element size.
-    ASSERT(StringDictionary::kEntrySize == 3);
+    ASSERT(NameDictionary::kEntrySize == 3);
     // scratch2 = scratch2 * 3.
     __ add(scratch2, scratch2, Operand(scratch2, LSL, 1));
 
@@ -7391,7 +7495,7 @@ void StringDictionaryLookupStub::GeneratePositiveLookup(MacroAssembler* masm,
     __ Move(r0, elements);
     __ Move(r1, name);
   }
-  StringDictionaryLookupStub stub(POSITIVE_LOOKUP);
+  NameDictionaryLookupStub stub(POSITIVE_LOOKUP);
   __ CallStub(&stub);
   __ cmp(r0, Operand::Zero());
   __ mov(scratch2, Operand(r2));
@@ -7402,15 +7506,15 @@ void StringDictionaryLookupStub::GeneratePositiveLookup(MacroAssembler* masm,
 }
 
 
-void StringDictionaryLookupStub::Generate(MacroAssembler* masm) {
+void NameDictionaryLookupStub::Generate(MacroAssembler* masm) {
   // This stub overrides SometimesSetsUpAFrame() to return false.  That means
   // we cannot call anything that could cause a GC from this stub.
   // Registers:
-  //  result: StringDictionary to probe
+  //  result: NameDictionary to probe
   //  r1: key
-  //  : StringDictionary to probe.
-  //  index_: will hold an index of entry if lookup is successful.
-  //          might alias with result_.
+  //  dictionary: NameDictionary to probe.
+  //  index: will hold an index of entry if lookup is successful.
+  //         might alias with result_.
   // Returns:
   //  result_ is zero if lookup failed, non zero otherwise.
 
@@ -7429,7 +7533,7 @@ void StringDictionaryLookupStub::Generate(MacroAssembler* masm) {
   __ mov(mask, Operand(mask, ASR, kSmiTagSize));
   __ sub(mask, mask, Operand(1));
 
-  __ ldr(hash, FieldMemOperand(key, String::kHashFieldOffset));
+  __ ldr(hash, FieldMemOperand(key, Name::kHashFieldOffset));
 
   __ LoadRoot(undefined, Heap::kUndefinedValueRootIndex);
 
@@ -7440,17 +7544,17 @@ void StringDictionaryLookupStub::Generate(MacroAssembler* masm) {
       // Add the probe offset (i + i * i) left shifted to avoid right shifting
       // the hash in a separate instruction. The value hash + i + i * i is right
       // shifted in the following and instruction.
-      ASSERT(StringDictionary::GetProbeOffset(i) <
-             1 << (32 - String::kHashFieldOffset));
+      ASSERT(NameDictionary::GetProbeOffset(i) <
+             1 << (32 - Name::kHashFieldOffset));
       __ add(index, hash, Operand(
-          StringDictionary::GetProbeOffset(i) << String::kHashShift));
+          NameDictionary::GetProbeOffset(i) << Name::kHashShift));
     } else {
       __ mov(index, Operand(hash));
     }
-    __ and_(index, mask, Operand(index, LSR, String::kHashShift));
+    __ and_(index, mask, Operand(index, LSR, Name::kHashShift));
 
     // Scale the index by multiplying by the entry size.
-    ASSERT(StringDictionary::kEntrySize == 3);
+    ASSERT(NameDictionary::kEntrySize == 3);
     __ add(index, index, Operand(index, LSL, 1));  // index *= 3.
 
     ASSERT_EQ(kSmiTagSize, 1);
@@ -7466,12 +7570,16 @@ void StringDictionaryLookupStub::Generate(MacroAssembler* masm) {
     __ b(eq, &in_dictionary);
 
     if (i != kTotalProbes - 1 && mode_ == NEGATIVE_LOOKUP) {
-      // Check if the entry name is not an internalized string.
+      // Check if the entry name is not a unique name.
+      Label cont;
       __ ldr(entry_key, FieldMemOperand(entry_key, HeapObject::kMapOffset));
       __ ldrb(entry_key,
               FieldMemOperand(entry_key, Map::kInstanceTypeOffset));
       __ tst(entry_key, Operand(kIsInternalizedMask));
-      __ b(eq, &maybe_in_dictionary);
+      __ b(ne, &cont);
+      __ cmp(entry_key, Operand(SYMBOL_TYPE));
+      __ b(ne, &maybe_in_dictionary);
+      __ bind(&cont);
     }
   }
 

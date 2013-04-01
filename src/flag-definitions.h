@@ -141,28 +141,37 @@ DEFINE_bool(harmony_typeof, false, "enable harmony semantics for typeof")
 DEFINE_bool(harmony_scoping, false, "enable harmony block scoping")
 DEFINE_bool(harmony_modules, false,
             "enable harmony modules (implies block scoping)")
+DEFINE_bool(harmony_symbols, false,
+            "enable harmony symbols (a.k.a. private names)")
 DEFINE_bool(harmony_proxies, false, "enable harmony proxies")
 DEFINE_bool(harmony_collections, false,
             "enable harmony collections (sets, maps, and weak maps)")
 DEFINE_bool(harmony_observation, false,
             "enable harmony object observation (implies harmony collections")
+DEFINE_bool(harmony_typed_arrays, false,
+            "enable harmony typed arrays")
 DEFINE_bool(harmony, false, "enable all harmony features (except typeof)")
 DEFINE_implication(harmony, harmony_scoping)
 DEFINE_implication(harmony, harmony_modules)
+DEFINE_implication(harmony, harmony_symbols)
 DEFINE_implication(harmony, harmony_proxies)
 DEFINE_implication(harmony, harmony_collections)
 DEFINE_implication(harmony, harmony_observation)
 DEFINE_implication(harmony_modules, harmony_scoping)
 DEFINE_implication(harmony_observation, harmony_collections)
+DEFINE_implication(harmony, harmony_typed_arrays)
 
 // Flags for experimental implementation features.
 DEFINE_bool(packed_arrays, true, "optimizes arrays that have no holes")
 DEFINE_bool(smi_only_arrays, true, "tracks arrays with only smi values")
 DEFINE_bool(compiled_transitions, false, "use optimizing compiler to "
             "generate array elements transition stubs")
+DEFINE_bool(compiled_keyed_stores, false, "use optimizing compiler to "
+            "generate keyed store stubs")
 DEFINE_bool(clever_optimizations,
             true,
             "Optimize object size, Array shift, DOM strings and string +")
+DEFINE_bool(pretenure_literals, false, "allocate literals in old space")
 
 // Flags for data representation optimizations
 DEFINE_bool(unbox_double_arrays, true, "automatically unbox arrays of doubles")
@@ -219,6 +228,8 @@ DEFINE_bool(unreachable_code_elimination, false,
             "eliminate unreachable code (hidden behind soft deopts)")
 DEFINE_bool(track_allocation_sites, true,
             "Use allocation site info to reduce transitions")
+DEFINE_bool(optimize_constructed_arrays, false,
+            "Use allocation site info on constructed arrays")
 DEFINE_bool(trace_osr, false, "trace on-stack replacement")
 DEFINE_int(stress_runs, 0, "number of stress runs")
 DEFINE_bool(optimize_closures, true, "optimize closures")
@@ -241,11 +252,10 @@ DEFINE_bool(opt_safe_uint32_operations, true,
 DEFINE_bool(parallel_recompilation, false,
             "optimizing hot functions asynchronously on a separate thread")
 DEFINE_bool(trace_parallel_recompilation, false, "track parallel recompilation")
-DEFINE_int(parallel_recompilation_queue_length, 2,
+DEFINE_int(parallel_recompilation_queue_length, 3,
            "the length of the parallel compilation queue")
-DEFINE_bool(manual_parallel_recompilation, false,
-            "disable automatic optimization")
-DEFINE_implication(manual_parallel_recompilation, parallel_recompilation)
+DEFINE_int(parallel_recompilation_delay, 0,
+           "artificial compilation delay in ms")
 DEFINE_bool(omit_prototype_checks_for_leaf_maps, true,
             "do not emit prototype checks if all prototypes have leaf maps, "
             "deoptimize the optimized code if the layout of the maps changes.")
@@ -365,10 +375,6 @@ DEFINE_bool(compilation_cache, true, "enable compilation cache")
 
 DEFINE_bool(cache_prototype_transitions, true, "cache prototype transitions")
 
-// cpu-profiler.cc
-DEFINE_int(cpu_profiler_sampling_period, 1000,
-           "CPU profiler sampling period in microseconds")
-
 // debug.cc
 DEFINE_bool(trace_debug_json, false, "trace debugging JSON request/response")
 DEFINE_bool(trace_js_array_abuse, false,
@@ -423,7 +429,7 @@ DEFINE_bool(trace_external_memory, false,
             "it is adjusted.")
 DEFINE_bool(collect_maps, true,
             "garbage collect maps from which no objects can be reached")
-DEFINE_bool(weak_embedded_maps_in_optimized_code, true,
+DEFINE_bool(weak_embedded_maps_in_optimized_code, false,
             "make maps embedded in optimized code weak")
 DEFINE_bool(flush_code, true,
             "flush code that we expect not to use again (during full gc)")

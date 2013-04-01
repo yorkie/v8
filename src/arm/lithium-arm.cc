@@ -290,6 +290,13 @@ void LTypeofIsAndBranch::PrintDataTo(StringStream* stream) {
 }
 
 
+void LInnerAllocatedObject::PrintDataTo(StringStream* stream) {
+  stream->Add(" = ");
+  base_object()->PrintTo(stream);
+  stream->Add(" + %d", offset());
+}
+
+
 void LCallConstantFunction::PrintDataTo(StringStream* stream) {
   stream->Add("#%d / ", arity());
 }
@@ -352,6 +359,17 @@ void LCallNew::PrintDataTo(StringStream* stream) {
   stream->Add("= ");
   constructor()->PrintTo(stream);
   stream->Add(" #%d / ", arity());
+}
+
+
+void LCallNewArray::PrintDataTo(StringStream* stream) {
+  stream->Add("= ");
+  constructor()->PrintTo(stream);
+  stream->Add(" #%d / ", arity());
+  ASSERT(hydrogen()->property_cell()->value()->IsSmi());
+  ElementsKind kind = static_cast<ElementsKind>(
+      Smi::cast(hydrogen()->property_cell()->value())->value());
+  stream->Add(" (%s) ", ElementsKindToString(kind));
 }
 
 
@@ -657,8 +675,12 @@ LInstruction* LChunkBuilder::AssignPointerMap(LInstruction* instr) {
 LUnallocated* LChunkBuilder::TempRegister() {
   LUnallocated* operand =
       new(zone()) LUnallocated(LUnallocated::MUST_HAVE_REGISTER);
-  operand->set_virtual_register(allocator_->GetVirtualRegister());
-  if (!allocator_->AllocationOk()) Abort("Not enough virtual registers.");
+  int vreg = allocator_->GetVirtualRegister();
+  if (!allocator_->AllocationOk()) {
+    Abort("Out of virtual registers while trying to allocate temp register.");
+    return NULL;
+  }
+  operand->set_virtual_register(vreg);
   return operand;
 }
 
@@ -917,7 +939,7 @@ LInstruction* LChunkBuilder::DoGoto(HGoto* instr) {
 LInstruction* LChunkBuilder::DoBranch(HBranch* instr) {
   HValue* value = instr->value();
   if (value->EmitAtUses()) {
-    HBasicBlock* successor = HConstant::cast(value)->ToBoolean()
+    HBasicBlock* successor = HConstant::cast(value)->BooleanValue()
         ? instr->FirstSuccessor()
         : instr->SecondSuccessor();
     return new(zone()) LGoto(successor->block_id());
@@ -1003,6 +1025,15 @@ LInstruction* LChunkBuilder::DoPushArgument(HPushArgument* instr) {
   ++argument_count_;
   LOperand* argument = Use(instr->argument());
   return new(zone()) LPushArgument(argument);
+}
+
+
+LInstruction* LChunkBuilder::DoInnerAllocatedObject(
+    HInnerAllocatedObject* inner_object) {
+  LOperand* base_object = UseRegisterAtStart(inner_object->base_object());
+  LInnerAllocatedObject* result =
+    new(zone()) LInnerAllocatedObject(base_object);
+  return DefineAsRegister(result);
 }
 
 
@@ -1139,6 +1170,14 @@ LInstruction* LChunkBuilder::DoCallNew(HCallNew* instr) {
 }
 
 
+LInstruction* LChunkBuilder::DoCallNewArray(HCallNewArray* instr) {
+  LOperand* constructor = UseFixed(instr->constructor(), r1);
+  argument_count_ -= instr->argument_count();
+  LCallNewArray* result = new(zone()) LCallNewArray(constructor);
+  return MarkAsCall(DefineFixed(result, r0), instr);
+}
+
+
 LInstruction* LChunkBuilder::DoCallFunction(HCallFunction* instr) {
   LOperand* function = UseFixed(instr->function(), r1);
   argument_count_ -= instr->argument_count();
@@ -1207,6 +1246,13 @@ LInstruction* LChunkBuilder::DoDiv(HDiv* instr) {
   if (instr->representation().IsDouble()) {
     return DoArithmeticD(Token::DIV, instr);
   } else if (instr->representation().IsInteger32()) {
+    if (instr->HasPowerOf2Divisor()) {
+      ASSERT(!instr->CheckFlag(HValue::kCanBeDivByZero));
+      LOperand* value = UseRegisterAtStart(instr->left());
+      LDivI* div =
+          new(zone()) LDivI(value, UseOrConstant(instr->right()));
+      return AssignEnvironment(DefineSameAsFirst(div));
+    }
     // TODO(1042) The fixed register allocation
     // is needed because we call TypeRecordingBinaryOpStub from
     // the generated code, which requires registers r0
@@ -1733,6 +1779,13 @@ LInstruction* LChunkBuilder::DoBoundsCheck(HBoundsCheck* instr) {
 }
 
 
+LInstruction* LChunkBuilder::DoBoundsCheckBaseIndexInformation(
+    HBoundsCheckBaseIndexInformation* instr) {
+  UNREACHABLE();
+  return NULL;
+}
+
+
 LInstruction* LChunkBuilder::DoAbnormalExit(HAbnormalExit* instr) {
   // The control instruction marking the end of a block that completed
   // abruptly (e.g., threw an exception).  There is nothing specific to do.
@@ -1903,7 +1956,9 @@ LInstruction* LChunkBuilder::DoClampToUint8(HClampToUint8* instr) {
 
 
 LInstruction* LChunkBuilder::DoReturn(HReturn* instr) {
-  return new(zone()) LReturn(UseFixed(instr->value(), r0));
+  LOperand* parameter_count = UseRegisterOrConstant(instr->parameter_count());
+  return new(zone()) LReturn(UseFixed(instr->value(), r0),
+                             parameter_count);
 }
 
 

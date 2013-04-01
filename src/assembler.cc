@@ -115,6 +115,7 @@ static double* math_exp_log_table_array = NULL;
 AssemblerBase::AssemblerBase(Isolate* isolate, void* buffer, int buffer_size)
     : isolate_(isolate),
       jit_cookie_(0),
+      enabled_cpu_features_(0),
       emit_debug_code_(FLAG_debug_code),
       predictable_code_size_(false) {
   if (FLAG_mask_constants_with_cookie && isolate != NULL)  {
@@ -177,6 +178,34 @@ PredictableCodeSizeScope::~PredictableCodeSizeScope() {
   }
   assembler_->set_predictable_code_size(old_value_);
 }
+
+
+// -----------------------------------------------------------------------------
+// Implementation of CpuFeatureScope
+
+#ifdef DEBUG
+CpuFeatureScope::CpuFeatureScope(AssemblerBase* assembler, CpuFeature f)
+    : assembler_(assembler) {
+  ASSERT(CpuFeatures::IsSafeForSnapshot(f));
+  old_enabled_ = assembler_->enabled_cpu_features();
+  uint64_t mask = static_cast<uint64_t>(1) << f;
+  // TODO(svenpanne) This special case below doesn't belong here!
+#if V8_TARGET_ARCH_ARM
+  // VFP2 and ARMv7 are implied by VFP3.
+  if (f == VFP3) {
+    mask |=
+        static_cast<uint64_t>(1) << VFP2 |
+        static_cast<uint64_t>(1) << ARMv7;
+  }
+#endif
+  assembler_->set_enabled_cpu_features(old_enabled_ | mask);
+}
+
+
+CpuFeatureScope::~CpuFeatureScope() {
+  assembler_->set_enabled_cpu_features(old_enabled_);
+}
+#endif
 
 
 // -----------------------------------------------------------------------------
@@ -760,7 +789,7 @@ const char* RelocInfo::RelocModeName(RelocInfo::Mode rmode) {
 }
 
 
-void RelocInfo::Print(FILE* out) {
+void RelocInfo::Print(Isolate* isolate, FILE* out) {
   PrintF(out, "%p  %s", pc_, RelocModeName(rmode_));
   if (IsComment(rmode_)) {
     PrintF(out, "  (%s)", reinterpret_cast<char*>(data_));
@@ -782,11 +811,11 @@ void RelocInfo::Print(FILE* out) {
     }
   } else if (IsPosition(rmode_)) {
     PrintF(out, "  (%" V8_PTR_PREFIX "d)", data());
-  } else if (rmode_ == RelocInfo::RUNTIME_ENTRY &&
-             Isolate::Current()->deoptimizer_data() != NULL) {
+  } else if (IsRuntimeEntry(rmode_) &&
+             isolate->deoptimizer_data() != NULL) {
     // Depotimization bailouts are stored as runtime entries.
     int id = Deoptimizer::GetDeoptimizationId(
-        target_address(), Deoptimizer::EAGER);
+        isolate, target_address(), Deoptimizer::EAGER);
     if (id != Deoptimizer::kNotDeoptimizationEntry) {
       PrintF(out, "  (deoptimization bailout %d)", id);
     }
@@ -898,20 +927,9 @@ void ExternalReference::InitializeMathExpData() {
     math_exp_log_table_array = new double[kTableSize];
     for (int i = 0; i < kTableSize; i++) {
       double value = pow(2, i / kTableSizeDouble);
-
       uint64_t bits = BitCast<uint64_t, double>(value);
       bits &= (static_cast<uint64_t>(1) << 52) - 1;
       double mantissa = BitCast<double, uint64_t>(bits);
-
-      // <just testing>
-      uint64_t doublebits;
-      memcpy(&doublebits, &value, sizeof doublebits);
-      doublebits &= (static_cast<uint64_t>(1) << 52) - 1;
-      double mantissa2;
-      memcpy(&mantissa2, &doublebits, sizeof mantissa2);
-      CHECK_EQ(mantissa, mantissa2);
-      // </just testing>
-
       math_exp_log_table_array[i] = mantissa;
     }
 
@@ -1156,6 +1174,20 @@ ExternalReference ExternalReference::heap_always_allocate_scope_depth(
 ExternalReference ExternalReference::new_space_allocation_limit_address(
     Isolate* isolate) {
   return ExternalReference(isolate->heap()->NewSpaceAllocationLimitAddress());
+}
+
+
+ExternalReference ExternalReference::old_pointer_space_allocation_top_address(
+    Isolate* isolate) {
+  return ExternalReference(
+      isolate->heap()->OldPointerSpaceAllocationTopAddress());
+}
+
+
+ExternalReference ExternalReference::old_pointer_space_allocation_limit_address(
+    Isolate* isolate) {
+  return ExternalReference(
+      isolate->heap()->OldPointerSpaceAllocationLimitAddress());
 }
 
 

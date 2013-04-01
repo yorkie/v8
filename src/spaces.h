@@ -894,6 +894,10 @@ class CodeRange {
   void TearDown();
 
   bool exists() { return this != NULL && code_range_ != NULL; }
+  Address start() {
+    if (this == NULL || code_range_ == NULL) return NULL;
+    return static_cast<Address>(code_range_->address());
+  }
   bool contains(Address address) {
     if (this == NULL || code_range_ == NULL) return false;
     Address start = static_cast<Address>(code_range_->address());
@@ -1648,11 +1652,7 @@ class PagedSpace : public Space {
 
   // As size, but the bytes in lazily swept pages are estimated and the bytes
   // in the current linear allocation area are not included.
-  virtual intptr_t SizeOfObjects() {
-    // TODO(hpayer): broken when concurrent sweeping turned on
-    ASSERT(!IsLazySweepingComplete() || (unswept_free_bytes_ == 0));
-    return Size() - unswept_free_bytes_ - (limit() - top());
-  }
+  virtual intptr_t SizeOfObjects();
 
   // Wasted bytes in this space.  These are just the bytes that were thrown away
   // due to being too small to use for allocation.  They do not include the
@@ -1662,6 +1662,10 @@ class PagedSpace : public Space {
   // Returns the allocation pointer in this space.
   Address top() { return allocation_info_.top; }
   Address limit() { return allocation_info_.limit; }
+
+  // The allocation top and limit addresses.
+  Address* allocation_top_address() { return &allocation_info_.top; }
+  Address* allocation_limit_address() { return &allocation_info_.limit; }
 
   // Allocate the requested number of bytes in the space if possible, return a
   // failure object if not.
@@ -1701,7 +1705,7 @@ class PagedSpace : public Space {
   }
 
   // Releases an unused page and shrinks the space.
-  void ReleasePage(Page* page);
+  void ReleasePage(Page* page, bool unlink);
 
   // The dummy page that anchors the linked list of pages.
   Page* anchor() { return &anchor_; }
@@ -1769,9 +1773,9 @@ class PagedSpace : public Space {
 
   bool AdvanceSweeper(intptr_t bytes_to_sweep);
 
-  // When parallel sweeper threads are active this function waits
-  // for them to complete, otherwise AdvanceSweeper with size_in_bytes
-  // is called.
+  // When parallel sweeper threads are active and the main thread finished
+  // its sweeping phase, this function waits for them to complete, otherwise
+  // AdvanceSweeper with size_in_bytes is called.
   bool EnsureSweeperProgress(intptr_t size_in_bytes);
 
   bool IsLazySweepingComplete() {
@@ -2414,11 +2418,6 @@ class NewSpace : public Space {
   bool AddFreshPage();
 
   virtual bool ReserveSpace(int bytes);
-
-  // Resizes a sequential string which must be the most recent thing that was
-  // allocated in new space.
-  template <typename StringType>
-  inline void ShrinkStringAtAllocationBoundary(String* string, int len);
 
 #ifdef VERIFY_HEAP
   // Verify the active semispace.

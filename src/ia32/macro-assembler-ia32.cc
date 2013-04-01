@@ -527,7 +527,7 @@ void MacroAssembler::StoreNumberToDoubleElements(
   ExternalReference canonical_nan_reference =
       ExternalReference::address_of_canonical_non_hole_nan();
   if (CpuFeatures::IsSupported(SSE2) && specialize_for_processor) {
-    CpuFeatures::Scope use_sse2(SSE2);
+    CpuFeatureScope use_sse2(this, SSE2);
     movdbl(scratch2, FieldOperand(maybe_number, HeapNumber::kValueOffset));
     bind(&have_double_value);
     movdbl(FieldOperand(elements, key, times_4,
@@ -549,7 +549,7 @@ void MacroAssembler::StoreNumberToDoubleElements(
   j(zero, &not_nan);
   bind(&is_nan);
   if (CpuFeatures::IsSupported(SSE2) && specialize_for_processor) {
-    CpuFeatures::Scope use_sse2(SSE2);
+    CpuFeatureScope use_sse2(this, SSE2);
     movdbl(scratch2, Operand::StaticVariable(canonical_nan_reference));
   } else {
     fld_d(Operand::StaticVariable(canonical_nan_reference));
@@ -562,7 +562,7 @@ void MacroAssembler::StoreNumberToDoubleElements(
   mov(scratch1, maybe_number);
   SmiUntag(scratch1);
   if (CpuFeatures::IsSupported(SSE2) && specialize_for_processor) {
-    CpuFeatures::Scope fscope(SSE2);
+    CpuFeatureScope fscope(this, SSE2);
     cvtsi2sd(scratch2, scratch1);
     movdbl(FieldOperand(elements, key, times_4,
                         FixedDoubleArray::kHeaderSize - elements_offset),
@@ -618,6 +618,7 @@ void MacroAssembler::CheckMap(Register obj,
 
 
 void MacroAssembler::DispatchMap(Register obj,
+                                 Register unused,
                                  Handle<Map> map,
                                  Handle<Code> success,
                                  SmiCheckType smi_check_type) {
@@ -640,6 +641,16 @@ Condition MacroAssembler::IsObjectStringType(Register heap_object,
   STATIC_ASSERT(kNotStringTag != 0);
   test(instance_type, Immediate(kIsNotStringMask));
   return zero;
+}
+
+
+Condition MacroAssembler::IsObjectNameType(Register heap_object,
+                                           Register map,
+                                           Register instance_type) {
+  mov(map, FieldOperand(heap_object, HeapObject::kMapOffset));
+  movzx_b(instance_type, FieldOperand(map, Map::kInstanceTypeOffset));
+  cmpb(instance_type, static_cast<uint8_t>(LAST_NAME_TYPE));
+  return below_equal;
 }
 
 
@@ -710,6 +721,19 @@ void MacroAssembler::AssertString(Register object) {
 }
 
 
+void MacroAssembler::AssertName(Register object) {
+  if (emit_debug_code()) {
+    test(object, Immediate(kSmiTagMask));
+    Check(not_equal, "Operand is a smi and not a name");
+    push(object);
+    mov(object, FieldOperand(object, HeapObject::kMapOffset));
+    CmpInstanceType(object, LAST_NAME_TYPE);
+    pop(object);
+    Check(below_equal, "Operand is not a name");
+  }
+}
+
+
 void MacroAssembler::AssertNotSmi(Register object) {
   if (emit_debug_code()) {
     test(object, Immediate(kSmiTagMask));
@@ -767,7 +791,7 @@ void MacroAssembler::EnterExitFramePrologue() {
 void MacroAssembler::EnterExitFrameEpilogue(int argc, bool save_doubles) {
   // Optionally save all XMM registers.
   if (save_doubles) {
-    CpuFeatures::Scope scope(SSE2);
+    CpuFeatureScope scope(this, SSE2);
     int space = XMMRegister::kNumRegisters * kDoubleSize + argc * kPointerSize;
     sub(esp, Immediate(space));
     const int offset = -2 * kPointerSize;
@@ -813,7 +837,7 @@ void MacroAssembler::EnterApiExitFrame(int argc) {
 void MacroAssembler::LeaveExitFrame(bool save_doubles) {
   // Optionally restore all XMM registers.
   if (save_doubles) {
-    CpuFeatures::Scope scope(SSE2);
+    CpuFeatureScope scope(this, SSE2);
     const int offset = -2 * kPointerSize;
     for (int i = 0; i < XMMRegister::kNumRegisters; i++) {
       XMMRegister reg = XMMRegister::from_code(i);
@@ -1191,8 +1215,8 @@ void MacroAssembler::LoadFromNumberDictionary(Label* miss,
 void MacroAssembler::LoadAllocationTopHelper(Register result,
                                              Register scratch,
                                              AllocationFlags flags) {
-  ExternalReference new_space_allocation_top =
-      ExternalReference::new_space_allocation_top_address(isolate());
+  ExternalReference allocation_top =
+      AllocationUtils::GetAllocationTopReference(isolate(), flags);
 
   // Just return if allocation top is already known.
   if ((flags & RESULT_CONTAINS_TOP) != 0) {
@@ -1200,7 +1224,7 @@ void MacroAssembler::LoadAllocationTopHelper(Register result,
     ASSERT(scratch.is(no_reg));
 #ifdef DEBUG
     // Assert that result actually contains top on entry.
-    cmp(result, Operand::StaticVariable(new_space_allocation_top));
+    cmp(result, Operand::StaticVariable(allocation_top));
     Check(equal, "Unexpected allocation top");
 #endif
     return;
@@ -1208,39 +1232,40 @@ void MacroAssembler::LoadAllocationTopHelper(Register result,
 
   // Move address of new object to result. Use scratch register if available.
   if (scratch.is(no_reg)) {
-    mov(result, Operand::StaticVariable(new_space_allocation_top));
+    mov(result, Operand::StaticVariable(allocation_top));
   } else {
-    mov(scratch, Immediate(new_space_allocation_top));
+    mov(scratch, Immediate(allocation_top));
     mov(result, Operand(scratch, 0));
   }
 }
 
 
 void MacroAssembler::UpdateAllocationTopHelper(Register result_end,
-                                               Register scratch) {
+                                               Register scratch,
+                                               AllocationFlags flags) {
   if (emit_debug_code()) {
     test(result_end, Immediate(kObjectAlignmentMask));
     Check(zero, "Unaligned allocation in new space");
   }
 
-  ExternalReference new_space_allocation_top =
-      ExternalReference::new_space_allocation_top_address(isolate());
+  ExternalReference allocation_top =
+      AllocationUtils::GetAllocationTopReference(isolate(), flags);
 
   // Update new top. Use scratch if available.
   if (scratch.is(no_reg)) {
-    mov(Operand::StaticVariable(new_space_allocation_top), result_end);
+    mov(Operand::StaticVariable(allocation_top), result_end);
   } else {
     mov(Operand(scratch, 0), result_end);
   }
 }
 
 
-void MacroAssembler::AllocateInNewSpace(int object_size,
-                                        Register result,
-                                        Register result_end,
-                                        Register scratch,
-                                        Label* gc_required,
-                                        AllocationFlags flags) {
+void MacroAssembler::Allocate(int object_size,
+                              Register result,
+                              Register result_end,
+                              Register scratch,
+                              Label* gc_required,
+                              AllocationFlags flags) {
   ASSERT((flags & (RESULT_CONTAINS_TOP | SIZE_IN_WORDS)) == 0);
   if (!FLAG_inline_new) {
     if (emit_debug_code()) {
@@ -1264,6 +1289,7 @@ void MacroAssembler::AllocateInNewSpace(int object_size,
   // Align the next allocation. Storing the filler map without checking top is
   // always safe because the limit of the heap is always aligned.
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
+    ASSERT((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     ASSERT(kPointerAlignment * 2 == kDoubleAlignment);
     Label aligned;
     test(result, Immediate(kDoubleAlignmentMask));
@@ -1276,20 +1302,20 @@ void MacroAssembler::AllocateInNewSpace(int object_size,
 
   Register top_reg = result_end.is_valid() ? result_end : result;
 
-  // Calculate new top and bail out if new space is exhausted.
-  ExternalReference new_space_allocation_limit =
-      ExternalReference::new_space_allocation_limit_address(isolate());
+  // Calculate new top and bail out if space is exhausted.
+  ExternalReference allocation_limit =
+      AllocationUtils::GetAllocationLimitReference(isolate(), flags);
 
   if (!top_reg.is(result)) {
     mov(top_reg, result);
   }
   add(top_reg, Immediate(object_size));
   j(carry, gc_required);
-  cmp(top_reg, Operand::StaticVariable(new_space_allocation_limit));
+  cmp(top_reg, Operand::StaticVariable(allocation_limit));
   j(above, gc_required);
 
   // Update allocation top.
-  UpdateAllocationTopHelper(top_reg, scratch);
+  UpdateAllocationTopHelper(top_reg, scratch, flags);
 
   // Tag result if requested.
   bool tag_result = (flags & TAG_OBJECT) != 0;
@@ -1306,16 +1332,15 @@ void MacroAssembler::AllocateInNewSpace(int object_size,
 }
 
 
-void MacroAssembler::AllocateInNewSpace(
-    int header_size,
-    ScaleFactor element_size,
-    Register element_count,
-    RegisterValueType element_count_type,
-    Register result,
-    Register result_end,
-    Register scratch,
-    Label* gc_required,
-    AllocationFlags flags) {
+void MacroAssembler::Allocate(int header_size,
+                              ScaleFactor element_size,
+                              Register element_count,
+                              RegisterValueType element_count_type,
+                              Register result,
+                              Register result_end,
+                              Register scratch,
+                              Label* gc_required,
+                              AllocationFlags flags) {
   ASSERT((flags & SIZE_IN_WORDS) == 0);
   if (!FLAG_inline_new) {
     if (emit_debug_code()) {
@@ -1338,6 +1363,7 @@ void MacroAssembler::AllocateInNewSpace(
   // Align the next allocation. Storing the filler map without checking top is
   // always safe because the limit of the heap is always aligned.
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
+    ASSERT((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     ASSERT(kPointerAlignment * 2 == kDoubleAlignment);
     Label aligned;
     test(result, Immediate(kDoubleAlignmentMask));
@@ -1348,9 +1374,9 @@ void MacroAssembler::AllocateInNewSpace(
     bind(&aligned);
   }
 
-  // Calculate new top and bail out if new space is exhausted.
-  ExternalReference new_space_allocation_limit =
-      ExternalReference::new_space_allocation_limit_address(isolate());
+  // Calculate new top and bail out if space is exhausted.
+  ExternalReference allocation_limit =
+      AllocationUtils::GetAllocationLimitReference(isolate(), flags);
 
   // We assume that element_count*element_size + header_size does not
   // overflow.
@@ -1367,7 +1393,7 @@ void MacroAssembler::AllocateInNewSpace(
   lea(result_end, Operand(element_count, element_size, header_size));
   add(result_end, result);
   j(carry, gc_required);
-  cmp(result_end, Operand::StaticVariable(new_space_allocation_limit));
+  cmp(result_end, Operand::StaticVariable(allocation_limit));
   j(above, gc_required);
 
   if ((flags & TAG_OBJECT) != 0) {
@@ -1376,16 +1402,16 @@ void MacroAssembler::AllocateInNewSpace(
   }
 
   // Update allocation top.
-  UpdateAllocationTopHelper(result_end, scratch);
+  UpdateAllocationTopHelper(result_end, scratch, flags);
 }
 
 
-void MacroAssembler::AllocateInNewSpace(Register object_size,
-                                        Register result,
-                                        Register result_end,
-                                        Register scratch,
-                                        Label* gc_required,
-                                        AllocationFlags flags) {
+void MacroAssembler::Allocate(Register object_size,
+                              Register result,
+                              Register result_end,
+                              Register scratch,
+                              Label* gc_required,
+                              AllocationFlags flags) {
   ASSERT((flags & (RESULT_CONTAINS_TOP | SIZE_IN_WORDS)) == 0);
   if (!FLAG_inline_new) {
     if (emit_debug_code()) {
@@ -1408,6 +1434,7 @@ void MacroAssembler::AllocateInNewSpace(Register object_size,
   // Align the next allocation. Storing the filler map without checking top is
   // always safe because the limit of the heap is always aligned.
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
+    ASSERT((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     ASSERT(kPointerAlignment * 2 == kDoubleAlignment);
     Label aligned;
     test(result, Immediate(kDoubleAlignmentMask));
@@ -1418,15 +1445,16 @@ void MacroAssembler::AllocateInNewSpace(Register object_size,
     bind(&aligned);
   }
 
-  // Calculate new top and bail out if new space is exhausted.
-  ExternalReference new_space_allocation_limit =
-      ExternalReference::new_space_allocation_limit_address(isolate());
+  // Calculate new top and bail out if space is exhausted.
+  ExternalReference allocation_limit =
+      AllocationUtils::GetAllocationLimitReference(isolate(), flags);
+
   if (!object_size.is(result_end)) {
     mov(result_end, object_size);
   }
   add(result_end, result);
   j(carry, gc_required);
-  cmp(result_end, Operand::StaticVariable(new_space_allocation_limit));
+  cmp(result_end, Operand::StaticVariable(allocation_limit));
   j(above, gc_required);
 
   // Tag result if requested.
@@ -1436,7 +1464,7 @@ void MacroAssembler::AllocateInNewSpace(Register object_size,
   }
 
   // Update allocation top.
-  UpdateAllocationTopHelper(result_end, scratch);
+  UpdateAllocationTopHelper(result_end, scratch, flags);
 }
 
 
@@ -1459,12 +1487,8 @@ void MacroAssembler::AllocateHeapNumber(Register result,
                                         Register scratch2,
                                         Label* gc_required) {
   // Allocate heap number in new space.
-  AllocateInNewSpace(HeapNumber::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(HeapNumber::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
 
   // Set the map.
   mov(FieldOperand(result, HeapObject::kMapOffset),
@@ -1487,15 +1511,15 @@ void MacroAssembler::AllocateTwoByteString(Register result,
   and_(scratch1, Immediate(~kObjectAlignmentMask));
 
   // Allocate two byte string in new space.
-  AllocateInNewSpace(SeqTwoByteString::kHeaderSize,
-                     times_1,
-                     scratch1,
-                     REGISTER_VALUE_IS_INT32,
-                     result,
-                     scratch2,
-                     scratch3,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SeqTwoByteString::kHeaderSize,
+           times_1,
+           scratch1,
+           REGISTER_VALUE_IS_INT32,
+           result,
+           scratch2,
+           scratch3,
+           gc_required,
+           TAG_OBJECT);
 
   // Set the map, length and hash field.
   mov(FieldOperand(result, HeapObject::kMapOffset),
@@ -1523,15 +1547,15 @@ void MacroAssembler::AllocateAsciiString(Register result,
   and_(scratch1, Immediate(~kObjectAlignmentMask));
 
   // Allocate ASCII string in new space.
-  AllocateInNewSpace(SeqOneByteString::kHeaderSize,
-                     times_1,
-                     scratch1,
-                     REGISTER_VALUE_IS_INT32,
-                     result,
-                     scratch2,
-                     scratch3,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SeqOneByteString::kHeaderSize,
+           times_1,
+           scratch1,
+           REGISTER_VALUE_IS_INT32,
+           result,
+           scratch2,
+           scratch3,
+           gc_required,
+           TAG_OBJECT);
 
   // Set the map, length and hash field.
   mov(FieldOperand(result, HeapObject::kMapOffset),
@@ -1552,12 +1576,8 @@ void MacroAssembler::AllocateAsciiString(Register result,
   ASSERT(length > 0);
 
   // Allocate ASCII string in new space.
-  AllocateInNewSpace(SeqOneByteString::SizeFor(length),
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SeqOneByteString::SizeFor(length), result, scratch1, scratch2,
+           gc_required, TAG_OBJECT);
 
   // Set the map, length and hash field.
   mov(FieldOperand(result, HeapObject::kMapOffset),
@@ -1574,12 +1594,8 @@ void MacroAssembler::AllocateTwoByteConsString(Register result,
                                         Register scratch2,
                                         Label* gc_required) {
   // Allocate heap number in new space.
-  AllocateInNewSpace(ConsString::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(ConsString::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
 
   // Set the map. The other fields are left uninitialized.
   mov(FieldOperand(result, HeapObject::kMapOffset),
@@ -1592,12 +1608,8 @@ void MacroAssembler::AllocateAsciiConsString(Register result,
                                              Register scratch2,
                                              Label* gc_required) {
   // Allocate heap number in new space.
-  AllocateInNewSpace(ConsString::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(ConsString::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
 
   // Set the map. The other fields are left uninitialized.
   mov(FieldOperand(result, HeapObject::kMapOffset),
@@ -1610,12 +1622,8 @@ void MacroAssembler::AllocateTwoByteSlicedString(Register result,
                                           Register scratch2,
                                           Label* gc_required) {
   // Allocate heap number in new space.
-  AllocateInNewSpace(SlicedString::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SlicedString::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
 
   // Set the map. The other fields are left uninitialized.
   mov(FieldOperand(result, HeapObject::kMapOffset),
@@ -1628,12 +1636,8 @@ void MacroAssembler::AllocateAsciiSlicedString(Register result,
                                                Register scratch2,
                                                Label* gc_required) {
   // Allocate heap number in new space.
-  AllocateInNewSpace(SlicedString::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SlicedString::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
 
   // Set the map. The other fields are left uninitialized.
   mov(FieldOperand(result, HeapObject::kMapOffset),
@@ -1807,7 +1811,8 @@ void MacroAssembler::CallStub(CodeStub* stub, TypeFeedbackId ast_id) {
 
 
 void MacroAssembler::TailCallStub(CodeStub* stub) {
-  ASSERT(allow_stub_calls_ || stub->CompilingCallsToThisStubIsGCSafe());
+  ASSERT(allow_stub_calls_ ||
+         stub->CompilingCallsToThisStubIsGCSafe(isolate()));
   jmp(stub->GetCode(isolate()), RelocInfo::CODE_TARGET);
 }
 
@@ -1820,7 +1825,7 @@ void MacroAssembler::StubReturn(int argc) {
 
 bool MacroAssembler::AllowThisStubCall(CodeStub* stub) {
   if (!has_frame_ && stub->SometimesSetsUpAFrame()) return false;
-  return allow_stub_calls_ || stub->CompilingCallsToThisStubIsGCSafe();
+  return allow_stub_calls_ || stub->CompilingCallsToThisStubIsGCSafe(isolate());
 }
 
 
@@ -2409,12 +2414,23 @@ void MacroAssembler::LoadInitialArrayMap(
 }
 
 
+void MacroAssembler::LoadGlobalContext(Register global_context) {
+  // Load the global or builtins object from the current context.
+  mov(global_context,
+      Operand(esi, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
+  // Load the native context from the global or builtins object.
+  mov(global_context,
+      FieldOperand(global_context, GlobalObject::kNativeContextOffset));
+}
+
+
 void MacroAssembler::LoadGlobalFunction(int index, Register function) {
   // Load the global or builtins object from the current context.
   mov(function,
       Operand(esi, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
   // Load the native context from the global or builtins object.
-  mov(function, FieldOperand(function, GlobalObject::kNativeContextOffset));
+  mov(function,
+      FieldOperand(function, GlobalObject::kNativeContextOffset));
   // Load the function from the native context.
   mov(function, Operand(function, Context::SlotOffset(index)));
 }

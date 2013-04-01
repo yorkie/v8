@@ -68,6 +68,8 @@ class Factory;
 class FunctionInfoListener;
 class HandleScopeImplementer;
 class HeapProfiler;
+class HStatistics;
+class HTracer;
 class InlineRuntimeFunctionsTable;
 class NoAllocationStringAllocator;
 class InnerPointerToCodeCache;
@@ -292,7 +294,8 @@ class SystemThreadManager {
   enum ParallelSystemComponent {
     PARALLEL_SWEEPING,
     CONCURRENT_SWEEPING,
-    PARALLEL_MARKING
+    PARALLEL_MARKING,
+    PARALLEL_RECOMPILATION
   };
 
   static int NumberOfParallelSystemThreads(ParallelSystemComponent type);
@@ -368,10 +371,11 @@ typedef List<HeapObject*, PreallocatedStorageAllocationPolicy> DebugObjectCache;
   V(unsigned, ast_node_count, 0)                                               \
   /* SafeStackFrameIterator activations count. */                              \
   V(int, safe_stack_iterator_counter, 0)                                       \
-  V(uint64_t, enabled_cpu_features, 0)                                         \
   V(CpuProfiler*, cpu_profiler, NULL)                                          \
   V(HeapProfiler*, heap_profiler, NULL)                                        \
   V(bool, observer_delivery_pending, false)                                    \
+  V(HStatistics*, hstatistics, NULL)                                           \
+  V(HTracer*, htracer, NULL)                                                   \
   ISOLATE_DEBUGGER_INIT_LIST(V)
 
 class Isolate {
@@ -984,8 +988,9 @@ class Isolate {
 
   int* code_kind_statistics() { return code_kind_statistics_; }
 
-  bool allow_handle_deref() { return allow_handle_deref_; }
-  void set_allow_handle_deref(bool allow) { allow_handle_deref_ = allow; }
+  bool AllowHandleDereference();
+
+  void SetAllowHandleDereference(bool allow);
 #endif
 
 #if defined(V8_TARGET_ARCH_ARM) && !defined(__arm__) || \
@@ -1100,8 +1105,13 @@ class Isolate {
     return sweeper_thread_;
   }
 
+  HStatistics* GetHStatistics();
+  HTracer* GetHTracer();
+
  private:
   Isolate();
+
+  int id() const { return static_cast<int>(id_); }
 
   friend struct GlobalState;
   friend struct InitializeGlobalState;
@@ -1170,6 +1180,9 @@ class Isolate {
   static Isolate* default_isolate_;
   static ThreadDataTable* thread_data_table_;
 
+  // A global counter for all generated Isolates, might overflow.
+  static Atomic32 isolate_counter_;
+
   void Deinit();
 
   static void SetIsolateThreadLocals(Isolate* isolate,
@@ -1214,6 +1227,7 @@ class Isolate {
   // the Error object.
   bool IsErrorObject(Handle<Object> obj);
 
+  Atomic32 id_;
   EntryStackItem* entry_stack_;
   int stack_trace_nesting_level_;
   StringStream* incomplete_message_;
@@ -1292,7 +1306,8 @@ class Isolate {
   JSObject::SpillInformation js_spill_information_;
   int code_kind_statistics_[Code::NUMBER_OF_KINDS];
 
-  bool allow_handle_deref_;
+  bool allow_compiler_thread_handle_deref_;
+  bool allow_execution_thread_handle_deref_;
 #endif
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
