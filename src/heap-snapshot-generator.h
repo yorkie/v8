@@ -479,10 +479,11 @@ class V8HeapExplorer : public HeapEntriesAllocator {
   void ExtractElementReferences(JSObject* js_obj, int entry);
   void ExtractInternalReferences(JSObject* js_obj, int entry);
   bool IsEssentialObject(Object* object);
-  void SetClosureReference(HeapObject* parent_obj,
+  void SetContextReference(HeapObject* parent_obj,
                            int parent,
                            String* reference_name,
-                           Object* child);
+                           Object* child,
+                           int field_offset);
   void SetNativeBindReference(HeapObject* parent_obj,
                               int parent,
                               const char* reference_name,
@@ -512,7 +513,7 @@ class V8HeapExplorer : public HeapEntriesAllocator {
                         int field_offset);
   void SetPropertyReference(HeapObject* parent_obj,
                             int parent,
-                            String* reference_name,
+                            Name* reference_name,
                             Object* child,
                             const char* name_format_string = NULL,
                             int field_offset = -1);

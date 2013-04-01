@@ -346,7 +346,7 @@ function SHR(y) {
 
 // ECMA-262, section 11.4.1, page 46.
 function DELETE(key, strict) {
-  return %DeleteProperty(%ToObject(this), %ToString(key), strict);
+  return %DeleteProperty(%ToObject(this), %ToName(key), strict);
 }
 
 
@@ -356,7 +356,7 @@ function IN(x) {
     throw %MakeTypeError('invalid_in_operator_use', [this, x]);
   }
   return %_IsNonNegativeSmi(this) ?
-    %HasElement(x, this) : %HasProperty(x, %ToString(this));
+    %HasElement(x, this) : %HasProperty(x, %ToName(this));
 }
 
 
@@ -396,7 +396,7 @@ function INSTANCE_OF(F) {
 // has a property with the given key; return the key as a string if
 // it has. Otherwise returns 0 (smi). Used in for-in statements.
 function FILTER_KEY(key) {
-  var string = %ToString(key);
+  var string = %ToName(key);
   if (%HasProperty(this, string)) return string;
   return 0;
 }
@@ -532,6 +532,7 @@ function ToNumber(x) {
   }
   if (IS_BOOLEAN(x)) return x ? 1 : 0;
   if (IS_UNDEFINED(x)) return $NaN;
+  if (IS_SYMBOL(x)) return $NaN;
   return (IS_NULL(x)) ? 0 : ToNumber(%DefaultNumber(x));
 }
 
@@ -542,6 +543,7 @@ function NonNumberToNumber(x) {
   }
   if (IS_BOOLEAN(x)) return x ? 1 : 0;
   if (IS_UNDEFINED(x)) return $NaN;
+  if (IS_SYMBOL(x)) return $NaN;
   return (IS_NULL(x)) ? 0 : ToNumber(%DefaultNumber(x));
 }
 
@@ -563,9 +565,16 @@ function NonStringToString(x) {
 }
 
 
+// ES6 symbols
+function ToName(x) {
+  return IS_SYMBOL(x) ? x : %ToString(x);
+}
+
+
 // ECMA-262, section 9.9, page 36.
 function ToObject(x) {
   if (IS_STRING(x)) return new $String(x);
+  if (IS_SYMBOL(x)) return new $Symbol(x);
   if (IS_NUMBER(x)) return new $Number(x);
   if (IS_BOOLEAN(x)) return new $Boolean(x);
   if (IS_NULL_OR_UNDEFINED(x) && !IS_UNDETECTABLE(x)) {

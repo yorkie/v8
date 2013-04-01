@@ -87,6 +87,10 @@ class LCodeGen BASE_EMBEDDED {
     return !NeedsEagerFrame() && info()->is_deferred_calling();
   }
 
+  RAStatus GetRAState() const {
+    return frame_is_built_ ? kRAHasBeenSaved : kRAHasNotBeenSaved;
+  }
+
   // Support for converting LOperands to assembler types.
   // LOperand must be a register.
   Register ToRegister(LOperand* op) const;
@@ -201,7 +205,6 @@ class LCodeGen BASE_EMBEDDED {
                        Register temporary2);
 
   int GetStackSlotCount() const { return chunk()->spill_slot_count(); }
-  int GetParameterCount() const { return info()->num_parameters(); }
 
   void Abort(const char* reason);
   void Comment(const char* format, ...);
@@ -274,6 +277,7 @@ class LCodeGen BASE_EMBEDDED {
                         LOperand* op,
                         bool is_tagged,
                         bool is_uint32,
+                        bool arguments_known,
                         int arguments_index,
                         int arguments_count);
   void RegisterDependentCodeForEmbeddedMaps(Handle<Code> code);

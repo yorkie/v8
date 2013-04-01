@@ -88,6 +88,33 @@ void Builtins::Generate_InRecompileQueue(MacroAssembler* masm) {
 }
 
 
+void Builtins::Generate_InstallRecompiledCode(MacroAssembler* masm) {
+  // Enter an internal frame.
+  {
+    FrameScope scope(masm, StackFrame::INTERNAL);
+
+    // Push a copy of the function onto the stack.
+    __ push(rdi);
+    // Push call kind information.
+    __ push(rcx);
+
+    __ push(rdi);  // Function is also the parameter to the runtime call.
+    __ CallRuntime(Runtime::kInstallRecompiledCode, 1);
+
+    // Restore call kind information.
+    __ pop(rcx);
+    // Restore function.
+    __ pop(rdi);
+
+    // Tear down internal frame.
+  }
+
+  // Do a tail-call of the compiled function.
+  __ lea(rax, FieldOperand(rax, Code::kHeaderSize));
+  __ jmp(rax);
+}
+
+
 void Builtins::Generate_ParallelRecompile(MacroAssembler* masm) {
   {
     FrameScope scope(masm, StackFrame::INTERNAL);
@@ -193,12 +220,12 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
       __ movzxbq(rdi, FieldOperand(rax, Map::kInstanceSizeOffset));
       __ shl(rdi, Immediate(kPointerSizeLog2));
       // rdi: size of new object
-      __ AllocateInNewSpace(rdi,
-                            rbx,
-                            rdi,
-                            no_reg,
-                            &rt_call,
-                            NO_ALLOCATION_FLAGS);
+      __ Allocate(rdi,
+                  rbx,
+                  rdi,
+                  no_reg,
+                  &rt_call,
+                  NO_ALLOCATION_FLAGS);
       // Allocated the JSObject, now initialize the fields.
       // rax: initial map
       // rbx: JSObject (not HeapObject tagged - the actual address).
@@ -260,14 +287,14 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
       // rbx: JSObject
       // rdi: start of next object (will be start of FixedArray)
       // rdx: number of elements in properties array
-      __ AllocateInNewSpace(FixedArray::kHeaderSize,
-                            times_pointer_size,
-                            rdx,
-                            rdi,
-                            rax,
-                            no_reg,
-                            &undo_allocation,
-                            RESULT_CONTAINS_TOP);
+      __ Allocate(FixedArray::kHeaderSize,
+                  times_pointer_size,
+                  rdx,
+                  rdi,
+                  rax,
+                  no_reg,
+                  &undo_allocation,
+                  RESULT_CONTAINS_TOP);
 
       // Initialize the FixedArray.
       // rbx: JSObject
@@ -523,6 +550,10 @@ static void Generate_JSEntryTrampolineHelper(MacroAssembler* masm,
 
     // Invoke the code.
     if (is_construct) {
+      // No type feedback cell is available
+      Handle<Object> undefined_sentinel(
+          masm->isolate()->factory()->undefined_value());
+      __ Move(rbx, undefined_sentinel);
       // Expects rdi to hold function pointer.
       CallConstructStub stub(NO_CALL_FUNCTION_FLAGS);
       __ CallStub(&stub);
@@ -1083,12 +1114,7 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
   if (initial_capacity > 0) {
     size += FixedArray::SizeFor(initial_capacity);
   }
-  __ AllocateInNewSpace(size,
-                        result,
-                        scratch2,
-                        scratch3,
-                        gc_required,
-                        TAG_OBJECT);
+  __ Allocate(size, result, scratch2, scratch3, gc_required, TAG_OBJECT);
 
   // Allocated the JSArray. Now initialize the fields except for the elements
   // array.
@@ -1186,14 +1212,14 @@ static void AllocateJSArray(MacroAssembler* masm,
   // requested elements.
   SmiIndex index =
       masm->SmiToIndex(kScratchRegister, array_size, kPointerSizeLog2);
-  __ AllocateInNewSpace(JSArray::kSize + FixedArray::kHeaderSize,
-                        index.scale,
-                        index.reg,
-                        result,
-                        elements_array_end,
-                        scratch,
-                        gc_required,
-                        TAG_OBJECT);
+  __ Allocate(JSArray::kSize + FixedArray::kHeaderSize,
+              index.scale,
+              index.reg,
+              result,
+              elements_array_end,
+              scratch,
+              gc_required,
+              TAG_OBJECT);
 
   // Allocated the JSArray. Now initialize the fields except for the elements
   // array.
@@ -1503,30 +1529,62 @@ void Builtins::Generate_ArrayConstructCode(MacroAssembler* masm) {
   //  -- rsp[0] : return address
   //  -- rsp[8] : last argument
   // -----------------------------------
-  Label generic_constructor;
-
   if (FLAG_debug_code) {
     // The array construct code is only set for the builtin and internal
     // Array functions which always have a map.
+
     // Initial map for the builtin Array function should be a map.
-    __ movq(rbx, FieldOperand(rdi, JSFunction::kPrototypeOrInitialMapOffset));
+    __ movq(rcx, FieldOperand(rdi, JSFunction::kPrototypeOrInitialMapOffset));
     // Will both indicate a NULL and a Smi.
     STATIC_ASSERT(kSmiTag == 0);
-    Condition not_smi = NegateCondition(masm->CheckSmi(rbx));
+    Condition not_smi = NegateCondition(masm->CheckSmi(rcx));
     __ Check(not_smi, "Unexpected initial map for Array function");
-    __ CmpObjectType(rbx, MAP_TYPE, rcx);
+    __ CmpObjectType(rcx, MAP_TYPE, rcx);
     __ Check(equal, "Unexpected initial map for Array function");
+
+    if (FLAG_optimize_constructed_arrays) {
+      // We should either have undefined in ebx or a valid jsglobalpropertycell
+      Label okay_here;
+      Handle<Object> undefined_sentinel(
+          masm->isolate()->factory()->undefined_value());
+      Handle<Map> global_property_cell_map(
+          masm->isolate()->heap()->global_property_cell_map());
+      __ Cmp(rbx, undefined_sentinel);
+      __ j(equal, &okay_here);
+      __ Cmp(FieldOperand(rbx, 0), global_property_cell_map);
+      __ Assert(equal, "Expected property cell in register rbx");
+      __ bind(&okay_here);
+    }
   }
 
-  // Run the native code for the Array function called as constructor.
-  ArrayNativeCode(masm, &generic_constructor);
+  if (FLAG_optimize_constructed_arrays) {
+    Label not_zero_case, not_one_case;
+    __ testq(rax, rax);
+    __ j(not_zero, &not_zero_case);
+    ArrayNoArgumentConstructorStub no_argument_stub;
+    __ TailCallStub(&no_argument_stub);
 
-  // Jump to the generic construct code in case the specialized code cannot
-  // handle the construction.
-  __ bind(&generic_constructor);
-  Handle<Code> generic_construct_stub =
-      masm->isolate()->builtins()->JSConstructStubGeneric();
-  __ Jump(generic_construct_stub, RelocInfo::CODE_TARGET);
+    __ bind(&not_zero_case);
+    __ cmpq(rax, Immediate(1));
+    __ j(greater, &not_one_case);
+    ArraySingleArgumentConstructorStub single_argument_stub;
+    __ TailCallStub(&single_argument_stub);
+
+    __ bind(&not_one_case);
+    ArrayNArgumentsConstructorStub n_argument_stub;
+    __ TailCallStub(&n_argument_stub);
+  } else {
+    Label generic_constructor;
+    // Run the native code for the Array function called as constructor.
+    ArrayNativeCode(masm, &generic_constructor);
+
+    // Jump to the generic construct code in case the specialized code cannot
+    // handle the construction.
+    __ bind(&generic_constructor);
+    Handle<Code> generic_construct_stub =
+        masm->isolate()->builtins()->JSConstructStubGeneric();
+    __ Jump(generic_construct_stub, RelocInfo::CODE_TARGET);
+  }
 }
 
 
@@ -1579,12 +1637,12 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
 
   // Allocate a JSValue and put the tagged pointer into rax.
   Label gc_required;
-  __ AllocateInNewSpace(JSValue::kSize,
-                        rax,  // Result.
-                        rcx,  // New allocation top (we ignore it).
-                        no_reg,
-                        &gc_required,
-                        TAG_OBJECT);
+  __ Allocate(JSValue::kSize,
+              rax,  // Result.
+              rcx,  // New allocation top (we ignore it).
+              no_reg,
+              &gc_required,
+              TAG_OBJECT);
 
   // Set the map.
   __ LoadGlobalFunctionInitialMap(rdi, rcx);

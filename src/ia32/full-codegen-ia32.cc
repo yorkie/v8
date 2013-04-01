@@ -1489,7 +1489,7 @@ void FullCodeGenerator::VisitRegExpLiteral(RegExpLiteral* expr) {
   __ bind(&materialized);
   int size = JSRegExp::kSize + JSRegExp::kInObjectFieldCount * kPointerSize;
   Label allocated, runtime_allocate;
-  __ AllocateInNewSpace(size, eax, ecx, edx, &runtime_allocate, TAG_OBJECT);
+  __ Allocate(size, eax, ecx, edx, &runtime_allocate, TAG_OBJECT);
   __ jmp(&allocated);
 
   __ bind(&runtime_allocate);
@@ -1601,8 +1601,6 @@ void FullCodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
           }
           break;
         }
-        // Fall through.
-      case ObjectLiteral::Property::PROTOTYPE:
         __ push(Operand(esp, 0));  // Duplicate receiver.
         VisitForStackValue(key);
         VisitForStackValue(value);
@@ -1611,6 +1609,15 @@ void FullCodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
           __ CallRuntime(Runtime::kSetProperty, 4);
         } else {
           __ Drop(3);
+        }
+        break;
+      case ObjectLiteral::Property::PROTOTYPE:
+        __ push(Operand(esp, 0));  // Duplicate receiver.
+        VisitForStackValue(value);
+        if (property->emit_store()) {
+          __ CallRuntime(Runtime::kSetPrototype, 2);
+        } else {
+          __ Drop(2);
         }
         break;
       case ObjectLiteral::Property::GETTER:
@@ -2964,7 +2971,7 @@ void FullCodeGenerator::EmitRandomHeapNumber(CallRuntime* expr) {
   // ( 1.(20 0s)(32 random bits) x 2^20 ) - (1.0 x 2^20)).
   // This is implemented on both SSE2 and FPU.
   if (CpuFeatures::IsSupported(SSE2)) {
-    CpuFeatures::Scope fscope(SSE2);
+    CpuFeatureScope fscope(masm(), SSE2);
     __ mov(ebx, Immediate(0x49800000));  // 1.0 x 2^20 as single.
     __ movd(xmm1, ebx);
     __ movd(xmm0, eax);
@@ -4245,6 +4252,10 @@ void FullCodeGenerator::EmitLiteralCompareTypeof(Expression* expr,
     __ test_b(FieldOperand(edx, Map::kBitFieldOffset),
               1 << Map::kIsUndetectable);
     Split(zero, if_true, if_false, fall_through);
+  } else if (check->Equals(isolate()->heap()->symbol_string())) {
+    __ JumpIfSmi(eax, if_false);
+    __ CmpObjectType(eax, SYMBOL_TYPE, edx);
+    Split(equal, if_true, if_false, fall_through);
   } else if (check->Equals(isolate()->heap()->boolean_string())) {
     __ cmp(eax, isolate()->factory()->true_value());
     __ j(equal, if_true);

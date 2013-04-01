@@ -62,6 +62,7 @@ class LCodeGen;
   V(CallKnownGlobal)                            \
   V(CallNamed)                                  \
   V(CallNew)                                    \
+  V(CallNewArray)                               \
   V(CallRuntime)                                \
   V(CallStub)                                   \
   V(CheckFunction)                              \
@@ -132,6 +133,7 @@ class LCodeGen;
   V(MathFloorOfDiv)                             \
   V(MathMinMax)                                 \
   V(MathPowHalf)                                \
+  V(MathRound)                                  \
   V(ModI)                                       \
   V(MulI)                                       \
   V(NumberTagD)                                 \
@@ -182,7 +184,8 @@ class LCodeGen;
   V(LoadFieldByIndex)                           \
   V(DateField)                                  \
   V(WrapReceiver)                               \
-  V(Drop)
+  V(Drop)                                       \
+  V(InnerAllocatedObject)
 
 
 #define DECLARE_CONCRETE_INSTRUCTION(type, mnemonic)              \
@@ -695,6 +698,25 @@ class LMathPowHalf: public LTemplateInstruction<1, 2, 1> {
   LOperand* temp() { return temps_[0]; }
 
   DECLARE_CONCRETE_INSTRUCTION(MathPowHalf, "math-pow-half")
+
+  virtual void PrintDataTo(StringStream* stream);
+};
+
+
+class LMathRound: public LTemplateInstruction<1, 2, 1> {
+ public:
+  LMathRound(LOperand* context, LOperand* value, LOperand* temp) {
+    inputs_[1] = context;
+    inputs_[0] = value;
+    temps_[0] = temp;
+  }
+
+  LOperand* context() { return inputs_[1]; }
+  LOperand* value() { return inputs_[0]; }
+  LOperand* temp() { return temps_[0]; }
+
+  DECLARE_CONCRETE_INSTRUCTION(MathRound, "math-round")
+  DECLARE_HYDROGEN_ACCESSOR(UnaryMathOperation)
 
   virtual void PrintDataTo(StringStream* stream);
 };
@@ -1370,12 +1392,23 @@ class LArithmeticT: public LTemplateInstruction<1, 3, 0> {
 };
 
 
-class LReturn: public LTemplateInstruction<0, 2, 0> {
+class LReturn: public LTemplateInstruction<0, 3, 0> {
  public:
-  explicit LReturn(LOperand* value, LOperand* context) {
+  explicit LReturn(LOperand* value, LOperand* context,
+                   LOperand* parameter_count) {
     inputs_[0] = value;
     inputs_[1] = context;
+    inputs_[2] = parameter_count;
   }
+
+  bool has_constant_parameter_count() {
+    return parameter_count()->IsConstantOperand();
+  }
+  LConstantOperand* constant_parameter_count() {
+    ASSERT(has_constant_parameter_count());
+    return LConstantOperand::cast(parameter_count());
+  }
+  LOperand* parameter_count() { return inputs_[2]; }
 
   DECLARE_CONCRETE_INSTRUCTION(Return, "return")
 };
@@ -1649,6 +1682,22 @@ class LDrop: public LTemplateInstruction<0, 0, 0> {
 };
 
 
+class LInnerAllocatedObject: public LTemplateInstruction<1, 1, 0> {
+ public:
+  explicit LInnerAllocatedObject(LOperand* base_object) {
+    inputs_[0] = base_object;
+  }
+
+  LOperand* base_object() { return inputs_[0]; }
+  int offset() { return hydrogen()->offset(); }
+
+  virtual void PrintDataTo(StringStream* stream);
+
+  DECLARE_CONCRETE_INSTRUCTION(InnerAllocatedObject, "sub-allocated-object")
+  DECLARE_HYDROGEN_ACCESSOR(InnerAllocatedObject)
+};
+
+
 class LThisFunction: public LTemplateInstruction<1, 0, 0> {
  public:
   DECLARE_CONCRETE_INSTRUCTION(ThisFunction, "this-function")
@@ -1840,6 +1889,25 @@ class LCallNew: public LTemplateInstruction<1, 2, 0> {
 
   DECLARE_CONCRETE_INSTRUCTION(CallNew, "call-new")
   DECLARE_HYDROGEN_ACCESSOR(CallNew)
+
+  virtual void PrintDataTo(StringStream* stream);
+
+  int arity() const { return hydrogen()->argument_count() - 1; }
+};
+
+
+class LCallNewArray: public LTemplateInstruction<1, 2, 0> {
+ public:
+  LCallNewArray(LOperand* context, LOperand* constructor) {
+    inputs_[0] = context;
+    inputs_[1] = constructor;
+  }
+
+  LOperand* context() { return inputs_[0]; }
+  LOperand* constructor() { return inputs_[1]; }
+
+  DECLARE_CONCRETE_INSTRUCTION(CallNewArray, "call-new-array")
+  DECLARE_HYDROGEN_ACCESSOR(CallNewArray)
 
   virtual void PrintDataTo(StringStream* stream);
 

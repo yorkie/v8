@@ -514,6 +514,7 @@ class MacroAssembler: public Assembler {
                            bool can_have_holes);
 
   void LoadGlobalFunction(int index, Register function);
+  void LoadArrayFunction(Register function);
 
   // Load the initial map from the global function. The registers
   // function and map can be the same, function is then overwritten.
@@ -576,6 +577,10 @@ class MacroAssembler: public Assembler {
   void IsObjectJSStringType(Register object,
                             Register scratch,
                             Label* fail);
+
+  void IsObjectNameType(Register object,
+                        Register scratch,
+                        Label* fail);
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
   // ---------------------------------------------------------------------------
@@ -660,25 +665,26 @@ class MacroAssembler: public Assembler {
   // ---------------------------------------------------------------------------
   // Allocation support
 
-  // Allocate an object in new space. The object_size is specified
-  // either in bytes or in words if the allocation flag SIZE_IN_WORDS
-  // is passed. If the new space is exhausted control continues at the
-  // gc_required label. The allocated object is returned in result. If
-  // the flag tag_allocated_object is true the result is tagged as as
-  // a heap object. All registers are clobbered also when control
-  // continues at the gc_required label.
-  void AllocateInNewSpace(int object_size,
-                          Register result,
-                          Register scratch1,
-                          Register scratch2,
-                          Label* gc_required,
-                          AllocationFlags flags);
-  void AllocateInNewSpace(Register object_size,
-                          Register result,
-                          Register scratch1,
-                          Register scratch2,
-                          Label* gc_required,
-                          AllocationFlags flags);
+  // Allocate an object in new space or old pointer space. The object_size is
+  // specified either in bytes or in words if the allocation flag SIZE_IN_WORDS
+  // is passed. If the space is exhausted control continues at the gc_required
+  // label. The allocated object is returned in result. If the flag
+  // tag_allocated_object is true the result is tagged as as a heap object.
+  // All registers are clobbered also when control continues at the gc_required
+  // label.
+  void Allocate(int object_size,
+                Register result,
+                Register scratch1,
+                Register scratch2,
+                Label* gc_required,
+                AllocationFlags flags);
+
+  void Allocate(Register object_size,
+                Register result,
+                Register scratch1,
+                Register scratch2,
+                Label* gc_required,
+                AllocationFlags flags);
 
   // Undo allocation in new space. The object passed and objects allocated after
   // it will no longer be allocated. The caller must make sure that no pointers
@@ -928,59 +934,55 @@ class MacroAssembler: public Assembler {
                               Register scratch1,
                               SwVfpRegister scratch2);
 
-  // Convert the HeapNumber pointed to by source to a 32bits signed integer
-  // dest. If the HeapNumber does not fit into a 32bits signed integer branch
-  // to not_int32 label. If VFP3 is available double_scratch is used but not
-  // scratch2.
-  void ConvertToInt32(Register source,
-                      Register dest,
-                      Register scratch,
-                      Register scratch2,
-                      DwVfpRegister double_scratch,
-                      Label *not_int32);
+  // Check if a double can be exactly represented as a signed 32-bit integer.
+  // Z flag set to one if true.
+  void TestDoubleIsInt32(DwVfpRegister double_input,
+                         DwVfpRegister double_scratch);
 
-  // Try to convert a double to a signed 32-bit integer. If the double value
-  // can be exactly represented as an integer, the code jumps to 'done' and
-  // 'result' contains the integer value. Otherwise, the code falls through.
-  void TryFastDoubleToInt32(Register result,
-                            DwVfpRegister double_input,
-                            DwVfpRegister double_scratch,
-                            Label* done);
+  // Try to convert a double to a signed 32-bit integer.
+  // Z flag set to one and result assigned if the conversion is exact.
+  void TryDoubleToInt32Exact(Register result,
+                             DwVfpRegister double_input,
+                             DwVfpRegister double_scratch);
 
-  // Truncates a double using a specific rounding mode, and writes the value
-  // to the result register.
-  // Clears the z flag (ne condition) if an overflow occurs.
-  // If kCheckForInexactConversion is passed, the z flag is also cleared if the
-  // conversion was inexact, i.e. if the double value could not be converted
-  // exactly to a 32-bit integer.
-  void EmitVFPTruncate(VFPRoundingMode rounding_mode,
-                       Register result,
-                       DwVfpRegister double_input,
-                       Register scratch,
-                       DwVfpRegister double_scratch,
-                       CheckForInexactConversion check
-                           = kDontCheckForInexactConversion);
+  // Floor a double and writes the value to the result register.
+  // Go to exact if the conversion is exact (to be able to test -0),
+  // fall through calling code if an overflow occurred, else go to done.
+  void TryInt32Floor(Register result,
+                     DwVfpRegister double_input,
+                     Register input_high,
+                     DwVfpRegister double_scratch,
+                     Label* done,
+                     Label* exact);
 
-  // Helper for EmitECMATruncate.
-  // This will truncate a floating-point value outside of the signed 32bit
-  // integer range to a 32bit signed integer.
-  // Expects the double value loaded in input_high and input_low.
-  // Exits with the answer in 'result'.
-  // Note that this code does not work for values in the 32bit range!
-  void EmitOutOfInt32RangeTruncate(Register result,
-                                   Register input_high,
-                                   Register input_low,
-                                   Register scratch);
+  // Performs a truncating conversion of a heap floating point number as used by
+  // the JS bitwise operations. See ECMA-262 9.5: ToInt32.
+  // Exits with 'result' holding the answer.
+  void ECMAConvertNumberToInt32(Register source,
+                                Register result,
+                                Register scratch,
+                                Register input_high,
+                                Register input_low,
+                                DwVfpRegister double_scratch1,
+                                DwVfpRegister double_scratch2);
 
   // Performs a truncating conversion of a floating point number as used by
   // the JS bitwise operations. See ECMA-262 9.5: ToInt32.
   // Exits with 'result' holding the answer and all other registers clobbered.
-  void EmitECMATruncate(Register result,
-                        DwVfpRegister double_input,
-                        DwVfpRegister double_scratch,
+  void ECMAToInt32VFP(Register result,
+                      DwVfpRegister double_input,
+                      DwVfpRegister double_scratch,
+                      Register scratch,
+                      Register input_high,
+                      Register input_low);
+
+  // Performs a truncating conversion of a floating point number as used by
+  // the JS bitwise operations. See ECMA-262 9.5: ToInt32.
+  // Exits with 'result' holding the answer.
+  void ECMAToInt32NoVFP(Register result,
                         Register scratch,
-                        Register scratch2,
-                        Register scratch3);
+                        Register input_high,
+                        Register input_low);
 
   // Count leading zeros in a 32 bit word.  On ARM5 and later it uses the clz
   // instruction.  On pre-ARM5 hardware this routine gives the wrong answer
@@ -1220,8 +1222,11 @@ class MacroAssembler: public Assembler {
   void AssertNotSmi(Register object);
   void AssertSmi(Register object);
 
-  // Abort execution if argument is a string, enabled via --debug-code.
+  // Abort execution if argument is not a string, enabled via --debug-code.
   void AssertString(Register object);
+
+  // Abort execution if argument is not a name, enabled via --debug-code.
+  void AssertName(Register object);
 
   // Abort execution if argument is not the root value with the given index,
   // enabled via --debug-code.
@@ -1357,6 +1362,16 @@ class MacroAssembler: public Assembler {
   // Helper for throwing exceptions.  Compute a handler address and jump to
   // it.  See the implementation for register usage.
   void JumpToHandlerEntry();
+
+  // Helper for ECMAToInt32VFP and ECMAToInt32NoVFP.
+  // It is expected that 31 <= exponent <= 83, and scratch is exponent - 1.
+  void ECMAToInt32Tail(Register result,
+                       Register scratch,
+                       Register input_high,
+                       Register input_low,
+                       Label* out_of_range,
+                       Label* negate,
+                       Label* done);
 
   // Compute memory operands for safepoint stack slots.
   static int SafepointRegisterStackIndex(int reg_code);

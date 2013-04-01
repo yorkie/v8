@@ -196,6 +196,18 @@ UsePosition* LiveRange::NextUsePositionRegisterIsBeneficial(
 }
 
 
+UsePosition* LiveRange::PreviousUsePositionRegisterIsBeneficial(
+    LifetimePosition start) {
+  UsePosition* pos = first_pos();
+  UsePosition* prev = NULL;
+  while (pos != NULL && pos->pos().Value() < start.Value()) {
+    if (pos->RegisterIsBeneficial()) prev = pos;
+    pos = pos->next();
+  }
+  return prev;
+}
+
+
 UsePosition* LiveRange::NextRegisterPosition(LifetimePosition start) {
   UsePosition* pos = NextUsePosition(start);
   while (pos != NULL && !pos->RequiresRegister()) {
@@ -206,9 +218,6 @@ UsePosition* LiveRange::NextRegisterPosition(LifetimePosition start) {
 
 
 bool LiveRange::CanBeSpilled(LifetimePosition pos) {
-  // TODO(kmillikin): Comment. Now.
-  if (pos.Value() <= Start().Value() && HasRegisterAssigned()) return false;
-
   // We cannot spill a live range that has a use requiring a register
   // at the current or the immediate next position.
   UsePosition* use_pos = NextRegisterPosition(pos);
@@ -842,8 +851,9 @@ void LAllocator::MeetConstraintsBetween(LInstruction* first,
         ASSERT(!cur_input->IsUsedAtStart());
 
         LUnallocated* input_copy = cur_input->CopyUnconstrained(zone());
-        cur_input->set_virtual_register(GetVirtualRegister());
+        int vreg = GetVirtualRegister();
         if (!AllocationOk()) return;
+        cur_input->set_virtual_register(vreg);
 
         if (RequiredRegisterKind(input_copy->virtual_register()) ==
             DOUBLE_REGISTERS) {
@@ -1917,12 +1927,6 @@ void LAllocator::AllocateBlockedReg(LiveRange* current) {
   if (pos.Value() < register_use->pos().Value()) {
     // All registers are blocked before the first use that requires a register.
     // Spill starting part of live range up to that use.
-    //
-    // Corner case: the first use position is equal to the start of the range.
-    // In this case we have nothing to spill and SpillBetween will just return
-    // this range to the list of unhandled ones. This will lead to the infinite
-    // loop.
-    ASSERT(current->Start().Value() < register_use->pos().Value());
     SpillBetween(current, current->Start(), register_use->pos());
     return;
   }
@@ -1933,6 +1937,7 @@ void LAllocator::AllocateBlockedReg(LiveRange* current) {
     LiveRange* tail = SplitBetween(current,
                                    current->Start(),
                                    block_pos[reg].InstructionStart());
+    if (!AllocationOk()) return;
     AddToUnhandledSorted(tail);
   }
 
@@ -1950,6 +1955,39 @@ void LAllocator::AllocateBlockedReg(LiveRange* current) {
 }
 
 
+LifetimePosition LAllocator::FindOptimalSpillingPos(LiveRange* range,
+                                                    LifetimePosition pos) {
+  HBasicBlock* block = GetBlock(pos.InstructionStart());
+  HBasicBlock* loop_header =
+      block->IsLoopHeader() ? block : block->parent_loop_header();
+
+  if (loop_header == NULL) return pos;
+
+  UsePosition* prev_use =
+    range->PreviousUsePositionRegisterIsBeneficial(pos);
+
+  while (loop_header != NULL) {
+    // We are going to spill live range inside the loop.
+    // If possible try to move spilling position backwards to loop header.
+    // This will reduce number of memory moves on the back edge.
+    LifetimePosition loop_start = LifetimePosition::FromInstructionIndex(
+        loop_header->first_instruction_index());
+
+    if (range->Covers(loop_start)) {
+      if (prev_use == NULL || prev_use->pos().Value() < loop_start.Value()) {
+        // No register beneficial use inside the loop before the pos.
+        pos = loop_start;
+      }
+    }
+
+    // Try hoisting out to an outer loop.
+    loop_header = loop_header->parent_loop_header();
+  }
+
+  return pos;
+}
+
+
 void LAllocator::SplitAndSpillIntersecting(LiveRange* current) {
   ASSERT(current->HasRegisterAssigned());
   int reg = current->assigned_register();
@@ -1958,11 +1996,13 @@ void LAllocator::SplitAndSpillIntersecting(LiveRange* current) {
     LiveRange* range = active_live_ranges_[i];
     if (range->assigned_register() == reg) {
       UsePosition* next_pos = range->NextRegisterPosition(current->Start());
+      LifetimePosition spill_pos = FindOptimalSpillingPos(range, split_pos);
       if (next_pos == NULL) {
-        SpillAfter(range, split_pos);
+        SpillAfter(range, spill_pos);
       } else {
-        SpillBetween(range, split_pos, next_pos->pos());
+        SpillBetween(range, spill_pos, next_pos->pos());
       }
+      if (!AllocationOk()) return;
       ActiveToHandled(range);
       --i;
     }
@@ -1981,6 +2021,7 @@ void LAllocator::SplitAndSpillIntersecting(LiveRange* current) {
           next_intersection = Min(next_intersection, next_pos->pos());
           SpillBetween(range, split_pos, next_intersection);
         }
+        if (!AllocationOk()) return;
         InactiveToHandled(range);
         --i;
       }
@@ -2006,8 +2047,9 @@ LiveRange* LAllocator::SplitRangeAt(LiveRange* range, LifetimePosition pos) {
   ASSERT(pos.IsInstructionStart() ||
          !chunk_->instructions()->at(pos.InstructionIndex())->IsControl());
 
-  LiveRange* result = LiveRangeFor(GetVirtualRegister());
+  int vreg = GetVirtualRegister();
   if (!AllocationOk()) return NULL;
+  LiveRange* result = LiveRangeFor(vreg);
   range->SplitAt(pos, result, zone_);
   return result;
 }
@@ -2072,7 +2114,7 @@ void LAllocator::SpillAfter(LiveRange* range, LifetimePosition pos) {
 void LAllocator::SpillBetween(LiveRange* range,
                               LifetimePosition start,
                               LifetimePosition end) {
-  ASSERT(start.Value() < end.Value());
+  CHECK(start.Value() < end.Value());
   LiveRange* second_part = SplitRangeAt(range, start);
   if (!AllocationOk()) return;
 
@@ -2084,6 +2126,7 @@ void LAllocator::SpillBetween(LiveRange* range,
         second_part,
         second_part->Start().InstructionEnd(),
         end.PrevInstruction().InstructionEnd());
+    if (!AllocationOk()) return;
 
     ASSERT(third_part != second_part);
 

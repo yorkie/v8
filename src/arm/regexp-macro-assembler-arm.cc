@@ -337,9 +337,6 @@ void RegExpMacroAssemblerARM::CheckNotBackReferenceIgnoreCase(
     __ b(ne, &fail);
     __ sub(r3, r3, Operand('a'));
     __ cmp(r3, Operand('z' - 'a'));  // Is r3 a lowercase letter?
-#ifndef ENABLE_LATIN_1
-    __ b(hi, &fail);
-#else
     __ b(ls, &loop_check);  // In range 'a'-'z'.
     // Latin-1: Check for values in range [224,254] but not 247.
     __ sub(r3, r3, Operand(224 - 'a'));
@@ -347,7 +344,6 @@ void RegExpMacroAssemblerARM::CheckNotBackReferenceIgnoreCase(
     __ b(hi, &fail);  // Weren't Latin-1 letters.
     __ cmp(r3, Operand(247 - 224));  // Check for 247.
     __ b(eq, &fail);
-#endif
 
     __ bind(&loop_check);
     __ cmp(r0, r1);
@@ -539,29 +535,23 @@ bool RegExpMacroAssemblerARM::CheckSpecialCharacterClass(uc16 type,
   case 's':
     // Match space-characters
     if (mode_ == ASCII) {
-      // ASCII space characters are '\t'..'\r' and ' '.
+      // One byte space characters are '\t'..'\r', ' ' and \u00a0.
       Label success;
       __ cmp(current_character(), Operand(' '));
       __ b(eq, &success);
       // Check range 0x09..0x0d
       __ sub(r0, current_character(), Operand('\t'));
       __ cmp(r0, Operand('\r' - '\t'));
-      BranchOrBacktrack(hi, on_no_match);
+      __ b(ls, &success);
+      // \u00a0 (NBSP).
+      __ cmp(r0, Operand(0x00a0 - '\t'));
+      BranchOrBacktrack(ne, on_no_match);
       __ bind(&success);
       return true;
     }
     return false;
   case 'S':
-    // Match non-space characters.
-    if (mode_ == ASCII) {
-      // ASCII space characters are '\t'..'\r' and ' '.
-      __ cmp(current_character(), Operand(' '));
-      BranchOrBacktrack(eq, on_no_match);
-      __ sub(r0, current_character(), Operand('\t'));
-      __ cmp(r0, Operand('\r' - '\t'));
-      BranchOrBacktrack(ls, on_no_match);
-      return true;
-    }
+    // The emitted code for generic character classes is good enough.
     return false;
   case 'd':
     // Match ASCII digits ('0'..'9')

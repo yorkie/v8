@@ -826,7 +826,7 @@ HeapEntry* V8HeapExplorer::AddEntry(HeapObject* object) {
   } else if (object->IsNativeContext()) {
     return AddEntry(object, HeapEntry::kHidden, "system / NativeContext");
   } else if (object->IsContext()) {
-    return AddEntry(object, HeapEntry::kHidden, "system / Context");
+    return AddEntry(object, HeapEntry::kObject, "system / Context");
   } else if (object->IsFixedArray() ||
              object->IsFixedDoubleArray() ||
              object->IsByteArray() ||
@@ -1097,6 +1097,27 @@ void V8HeapExplorer::ExtractStringReferences(int entry, String* string) {
 
 
 void V8HeapExplorer::ExtractContextReferences(int entry, Context* context) {
+  if (context == context->declaration_context()) {
+    ScopeInfo* scope_info = context->closure()->shared()->scope_info();
+    // Add context allocated locals.
+    int context_locals = scope_info->ContextLocalCount();
+    for (int i = 0; i < context_locals; ++i) {
+      String* local_name = scope_info->ContextLocalName(i);
+      int idx = Context::MIN_CONTEXT_SLOTS + i;
+      SetContextReference(context, entry, local_name, context->get(idx),
+                          Context::OffsetOfElementAt(idx));
+    }
+    if (scope_info->HasFunctionName()) {
+      String* name = scope_info->FunctionName();
+      VariableMode mode;
+      int idx = scope_info->FunctionContextSlotIndex(name, &mode);
+      if (idx >= 0) {
+        SetContextReference(context, entry, name, context->get(idx),
+                            Context::OffsetOfElementAt(idx));
+      }
+    }
+  }
+
 #define EXTRACT_CONTEXT_FIELD(index, type, name) \
   SetInternalReference(context, entry, #name, context->get(Context::index), \
       FixedArray::OffsetOfElementAt(Context::index));
@@ -1286,26 +1307,6 @@ void V8HeapExplorer::ExtractClosureReferences(JSObject* js_obj, int entry) {
       SetNativeBindReference(js_obj, entry, reference_name,
                              bindings->get(i));
     }
-  } else {
-    Context* context = func->context()->declaration_context();
-    ScopeInfo* scope_info = context->closure()->shared()->scope_info();
-    // Add context allocated locals.
-    int context_locals = scope_info->ContextLocalCount();
-    for (int i = 0; i < context_locals; ++i) {
-      String* local_name = scope_info->ContextLocalName(i);
-      int idx = Context::MIN_CONTEXT_SLOTS + i;
-      SetClosureReference(js_obj, entry, local_name, context->get(idx));
-    }
-
-    // Add function variable.
-    if (scope_info->HasFunctionName()) {
-      String* name = scope_info->FunctionName();
-      VariableMode mode;
-      int idx = scope_info->FunctionContextSlotIndex(name, &mode);
-      if (idx >= 0) {
-        SetClosureReference(js_obj, entry, name, context->get(idx));
-      }
-    }
   }
 }
 
@@ -1320,7 +1321,7 @@ void V8HeapExplorer::ExtractPropertyReferences(JSObject* js_obj, int entry) {
         case FIELD: {
           int index = descs->GetFieldIndex(i);
 
-          String* k = descs->GetKey(i);
+          Name* k = descs->GetKey(i);
           if (index < js_obj->map()->inobject_properties()) {
             Object* value = js_obj->InObjectPropertyAt(index);
             if (k != heap_->hidden_string()) {
@@ -1378,7 +1379,7 @@ void V8HeapExplorer::ExtractPropertyReferences(JSObject* js_obj, int entry) {
       }
     }
   } else {
-    StringDictionary* dictionary = js_obj->property_dictionary();
+    NameDictionary* dictionary = js_obj->property_dictionary();
     int length = dictionary->Capacity();
     for (int i = 0; i < length; ++i) {
       Object* k = dictionary->KeyAt(i);
@@ -1580,16 +1581,18 @@ bool V8HeapExplorer::IsEssentialObject(Object* object) {
 }
 
 
-void V8HeapExplorer::SetClosureReference(HeapObject* parent_obj,
+void V8HeapExplorer::SetContextReference(HeapObject* parent_obj,
                                          int parent_entry,
                                          String* reference_name,
-                                         Object* child_obj) {
+                                         Object* child_obj,
+                                         int field_offset) {
   HeapEntry* child_entry = GetEntry(child_obj);
   if (child_entry != NULL) {
     filler_->SetNamedReference(HeapGraphEdge::kContextVariable,
                                parent_entry,
                                collection_->names()->GetName(reference_name),
                                child_entry);
+    IndexedReferencesExtractor::MarkVisitedField(parent_obj, field_offset);
   }
 }
 
@@ -1688,19 +1691,20 @@ void V8HeapExplorer::SetWeakReference(HeapObject* parent_obj,
 
 void V8HeapExplorer::SetPropertyReference(HeapObject* parent_obj,
                                           int parent_entry,
-                                          String* reference_name,
+                                          Name* reference_name,
                                           Object* child_obj,
                                           const char* name_format_string,
                                           int field_offset) {
   HeapEntry* child_entry = GetEntry(child_obj);
   if (child_entry != NULL) {
-    HeapGraphEdge::Type type = reference_name->length() > 0 ?
-        HeapGraphEdge::kProperty : HeapGraphEdge::kInternal;
-    const char* name = name_format_string  != NULL ?
-        collection_->names()->GetFormatted(
-            name_format_string,
-            *reference_name->ToCString(DISALLOW_NULLS,
-                                       ROBUST_STRING_TRAVERSAL)) :
+    HeapGraphEdge::Type type =
+        reference_name->IsSymbol() || String::cast(reference_name)->length() > 0
+            ? HeapGraphEdge::kProperty : HeapGraphEdge::kInternal;
+    const char* name = name_format_string != NULL && reference_name->IsString()
+        ? collection_->names()->GetFormatted(
+              name_format_string,
+              *String::cast(reference_name)->ToCString(
+                  DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL)) :
         collection_->names()->GetName(reference_name);
 
     filler_->SetNamedReference(type,

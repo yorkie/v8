@@ -87,6 +87,8 @@ enum BuiltinExtraArguments {
                                     Code::kNoExtraICState)              \
   V(InRecompileQueue,               BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
+  V(InstallRecompiledCode,          BUILTIN, UNINITIALIZED,             \
+                                    Code::kNoExtraICState)              \
   V(JSConstructStubCountdown,       BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
   V(JSConstructStubGeneric,         BUILTIN, UNINITIALIZED,             \
@@ -272,6 +274,7 @@ enum BuiltinExtraArguments {
   V(APPLY_PREPARE, 1)                    \
   V(APPLY_OVERFLOW, 1)
 
+MaybeObject* ArrayConstructor_StubFailure(Arguments args, Isolate* isolate);
 
 class BuiltinFunctionTable;
 class ObjectVisitor;
@@ -365,6 +368,7 @@ class Builtins {
                                CFunctionId id,
                                BuiltinExtraArguments extra_args);
   static void Generate_InRecompileQueue(MacroAssembler* masm);
+  static void Generate_InstallRecompiledCode(MacroAssembler* masm);
   static void Generate_ParallelRecompile(MacroAssembler* masm);
   static void Generate_JSConstructStubCountdown(MacroAssembler* masm);
   static void Generate_JSConstructStubGeneric(MacroAssembler* masm);

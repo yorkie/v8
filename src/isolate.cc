@@ -338,7 +338,7 @@ Thread::LocalStorageKey Isolate::thread_id_key_;
 Thread::LocalStorageKey Isolate::per_isolate_thread_data_key_;
 Mutex* Isolate::process_wide_mutex_ = OS::CreateMutex();
 Isolate::ThreadDataTable* Isolate::thread_data_table_ = NULL;
-
+Atomic32 Isolate::isolate_counter_ = 0;
 
 Isolate::PerIsolateThreadData* Isolate::AllocatePerIsolateThreadData(
     ThreadId thread_id) {
@@ -612,13 +612,16 @@ Handle<JSArray> Isolate::CaptureSimpleStackTrace(Handle<JSObject> error_object,
   limit = Max(limit, 0);  // Ensure that limit is not negative.
   int initial_size = Min(limit, 10);
   Handle<FixedArray> elements =
-      factory()->NewFixedArrayWithHoles(initial_size * 4);
+      factory()->NewFixedArrayWithHoles(initial_size * 4 + 1);
 
   // If the caller parameter is a function we skip frames until we're
   // under it before starting to collect.
   bool seen_caller = !caller->IsJSFunction();
-  int cursor = 0;
+  // First element is reserved to store the number of non-strict frames.
+  int cursor = 1;
   int frames_seen = 0;
+  int non_strict_frames = 0;
+  bool encountered_strict_function = false;
   for (StackFrameIterator iter(this);
        !iter.done() && frames_seen < limit;
        iter.Advance()) {
@@ -646,6 +649,17 @@ Handle<JSArray> Isolate::CaptureSimpleStackTrace(Handle<JSObject> error_object,
         Handle<JSFunction> fun = frames[i].function();
         Handle<Code> code = frames[i].code();
         Handle<Smi> offset(Smi::FromInt(frames[i].offset()), this);
+        // The stack trace API should not expose receivers and function
+        // objects on frames deeper than the top-most one with a strict
+        // mode function.  The number of non-strict frames is stored as
+        // first element in the result array.
+        if (!encountered_strict_function) {
+          if (!fun->shared()->is_classic_mode()) {
+            encountered_strict_function = true;
+          } else {
+            non_strict_frames++;
+          }
+        }
         elements->set(cursor++, *recv);
         elements->set(cursor++, *fun);
         elements->set(cursor++, *code);
@@ -653,6 +667,7 @@ Handle<JSArray> Isolate::CaptureSimpleStackTrace(Handle<JSObject> error_object,
       }
     }
   }
+  elements->set(0, Smi::FromInt(non_strict_frames));
   Handle<JSArray> result = factory()->NewJSArrayWithElements(elements);
   result->set_length(Smi::FromInt(cursor));
   return result;
@@ -754,7 +769,7 @@ Handle<JSArray> Isolate::CaptureCurrentStackTrace(
 
       if (options & StackTrace::kFunctionName) {
         Handle<Object> fun_name(fun->shared()->name(), this);
-        if (fun_name->ToBoolean()->IsFalse()) {
+        if (!fun_name->BooleanValue()) {
           fun_name = Handle<Object>(fun->shared()->inferred_name(), this);
         }
         CHECK_NOT_EMPTY_HANDLE(this,
@@ -944,11 +959,7 @@ bool Isolate::MayNamedAccess(JSObject* receiver, Object* key,
   if (decision != UNKNOWN) return decision == YES;
 
   // Get named access check callback
-  // TODO(dcarney): revert
-  Map* map = receiver->map();
-  CHECK(map->IsMap());
-  CHECK(map->constructor()->IsJSFunction());
-  JSFunction* constructor = JSFunction::cast(map->constructor());
+  JSFunction* constructor = JSFunction::cast(receiver->map()->constructor());
   if (!constructor->shared()->IsApiFunction()) return false;
 
   Object* data_obj =
@@ -1042,7 +1053,8 @@ Failure* Isolate::StackOverflow() {
   Handle<Object> stack_trace_limit =
       GetProperty(Handle<JSObject>::cast(error), "stackTraceLimit");
   if (!stack_trace_limit->IsNumber()) return Failure::Exception();
-  int limit = static_cast<int>(stack_trace_limit->Number());
+  double dlimit = stack_trace_limit->Number();
+  int limit = isnan(dlimit) ? 0 : static_cast<int>(dlimit);
 
   Handle<JSArray> stack_trace = CaptureSimpleStackTrace(
       exception, factory()->undefined_value(), limit);
@@ -1624,7 +1636,8 @@ void Isolate::ThreadDataTable::RemoveAllThreads(Isolate* isolate) {
 #define TRACE_ISOLATE(tag)                                              \
   do {                                                                  \
     if (FLAG_trace_isolates) {                                          \
-      PrintF("Isolate %p " #tag "\n", reinterpret_cast<void*>(this));   \
+      PrintF("Isolate %p (id %d)" #tag "\n",                            \
+             reinterpret_cast<void*>(this), id());                      \
     }                                                                   \
   } while (false)
 #else
@@ -1684,6 +1697,7 @@ Isolate::Isolate()
       optimizing_compiler_thread_(this),
       marking_thread_(NULL),
       sweeper_thread_(NULL) {
+  id_ = NoBarrier_AtomicIncrement(&isolate_counter_, 1);
   TRACE_ISOLATE(constructor);
 
   memset(isolate_addresses_, 0,
@@ -1710,7 +1724,8 @@ Isolate::Isolate()
   memset(code_kind_statistics_, 0,
          sizeof(code_kind_statistics_[0]) * Code::NUMBER_OF_KINDS);
 
-  allow_handle_deref_ = true;
+  allow_compiler_thread_handle_deref_ = true;
+  allow_execution_thread_handle_deref_ = true;
 #endif
 
 #ifdef ENABLE_DEBUGGER_SUPPORT
@@ -1772,6 +1787,8 @@ void Isolate::Deinit() {
   if (state_ == INITIALIZED) {
     TRACE_ISOLATE(deinit);
 
+    if (FLAG_parallel_recompilation) optimizing_compiler_thread_.Stop();
+
     if (FLAG_sweeper_threads > 0) {
       for (int i = 0; i < FLAG_sweeper_threads; i++) {
         sweeper_thread_[i]->Stop();
@@ -1788,9 +1805,7 @@ void Isolate::Deinit() {
       delete[] marking_thread_;
     }
 
-    if (FLAG_parallel_recompilation) optimizing_compiler_thread_.Stop();
-
-    if (FLAG_hydrogen_stats) HStatistics::Instance()->Print();
+    if (FLAG_hydrogen_stats) GetHStatistics()->Print();
 
     // We must stop the logger before we tear down other components.
     logger_->EnsureTickerStopped();
@@ -2064,7 +2079,7 @@ bool Isolate::Init(Deserializer* des) {
     return false;
   }
 
-  deoptimizer_data_ = new DeoptimizerData;
+  deoptimizer_data_ = new DeoptimizerData(memory_allocator_);
 
   const bool create_heap_objects = (des == NULL);
   if (create_heap_objects && !heap_.CreateHeapObjects()) {
@@ -2154,8 +2169,10 @@ bool Isolate::Init(Deserializer* des) {
   }
 
   if (!Serializer::enabled()) {
-    // Ensure that the stub failure trampoline has been generated.
+    // Ensure that all stubs which need to be generated ahead of time, but
+    // cannot be serialized into the snapshot have been generated.
     HandleScope scope(this);
+    StoreBufferOverflowStub::GenerateFixedRegStubsAheadOfTime(this);
     CodeStub::GenerateFPStubs(this);
     StubFailureTrampolineStub::GenerateAheadOfTime(this);
   }
@@ -2197,6 +2214,11 @@ bool Isolate::Init(Deserializer* des) {
   } else {
     FLAG_concurrent_sweeping = false;
     FLAG_parallel_sweeping = false;
+  }
+  if (FLAG_parallel_recompilation &&
+      SystemThreadManager::NumberOfParallelSystemThreads(
+          SystemThreadManager::PARALLEL_RECOMPILATION) == 0) {
+    FLAG_parallel_recompilation = false;
   }
   return true;
 }
@@ -2308,6 +2330,45 @@ void Isolate::UnlinkDeferredHandles(DeferredHandles* deferred) {
   if (deferred->previous_ != NULL) {
     deferred->previous_->next_ = deferred->next_;
   }
+}
+
+
+#ifdef DEBUG
+bool Isolate::AllowHandleDereference() {
+  if (allow_execution_thread_handle_deref_ &&
+      allow_compiler_thread_handle_deref_) {
+    // Short-cut to avoid polling thread id.
+    return true;
+  }
+  if (FLAG_parallel_recompilation &&
+      optimizing_compiler_thread()->IsOptimizerThread()) {
+    return allow_compiler_thread_handle_deref_;
+  } else {
+    return allow_execution_thread_handle_deref_;
+  }
+}
+
+
+void Isolate::SetAllowHandleDereference(bool allow) {
+  if (FLAG_parallel_recompilation &&
+      optimizing_compiler_thread()->IsOptimizerThread()) {
+    allow_compiler_thread_handle_deref_ = allow;
+  } else {
+    allow_execution_thread_handle_deref_ = allow;
+  }
+}
+#endif
+
+
+HStatistics* Isolate::GetHStatistics() {
+  if (hstatistics() == NULL) set_hstatistics(new HStatistics());
+  return hstatistics();
+}
+
+
+HTracer* Isolate::GetHTracer() {
+  if (htracer() == NULL) set_htracer(new HTracer(id()));
+  return htracer();
 }
 
 

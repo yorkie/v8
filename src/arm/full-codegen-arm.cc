@@ -1547,7 +1547,7 @@ void FullCodeGenerator::VisitRegExpLiteral(RegExpLiteral* expr) {
   __ bind(&materialized);
   int size = JSRegExp::kSize + JSRegExp::kInObjectFieldCount * kPointerSize;
   Label allocated, runtime_allocate;
-  __ AllocateInNewSpace(size, r0, r2, r3, &runtime_allocate, TAG_OBJECT);
+  __ Allocate(size, r0, r2, r3, &runtime_allocate, TAG_OBJECT);
   __ jmp(&allocated);
 
   __ bind(&runtime_allocate);
@@ -1646,8 +1646,6 @@ void FullCodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
           }
           break;
         }
-        // Fall through.
-      case ObjectLiteral::Property::PROTOTYPE:
         // Duplicate receiver on stack.
         __ ldr(r0, MemOperand(sp));
         __ push(r0);
@@ -1661,6 +1659,18 @@ void FullCodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
           __ Drop(3);
         }
         break;
+      case ObjectLiteral::Property::PROTOTYPE:
+        // Duplicate receiver on stack.
+        __ ldr(r0, MemOperand(sp));
+        __ push(r0);
+        VisitForStackValue(value);
+        if (property->emit_store()) {
+          __ CallRuntime(Runtime::kSetPrototype, 2);
+        } else {
+          __ Drop(2);
+        }
+        break;
+
       case ObjectLiteral::Property::GETTER:
         accessor_table.lookup(key)->second->getter = value;
         break;
@@ -3021,7 +3031,7 @@ void FullCodeGenerator::EmitRandomHeapNumber(CallRuntime* expr) {
     __ ldr(r0, FieldMemOperand(r0, GlobalObject::kNativeContextOffset));
     __ CallCFunction(ExternalReference::random_uint32_function(isolate()), 1);
 
-    CpuFeatures::Scope scope(VFP2);
+    CpuFeatureScope scope(masm(), VFP2);
     // 0x41300000 is the top half of 1.0 x 2^20 as a double.
     // Create this constant using mov/orr to avoid PC relative load.
     __ mov(r1, Operand(0x41000000));
@@ -4259,6 +4269,10 @@ void FullCodeGenerator::EmitLiteralCompareTypeof(Expression* expr,
     __ b(ge, if_false);
     __ ldrb(r1, FieldMemOperand(r0, Map::kBitFieldOffset));
     __ tst(r1, Operand(1 << Map::kIsUndetectable));
+    Split(eq, if_true, if_false, fall_through);
+  } else if (check->Equals(isolate()->heap()->symbol_string())) {
+    __ JumpIfSmi(r0, if_false);
+    __ CompareObjectType(r0, r0, r1, SYMBOL_TYPE);
     Split(eq, if_true, if_false, fall_through);
   } else if (check->Equals(isolate()->heap()->boolean_string())) {
     __ CompareRoot(r0, Heap::kTrueValueRootIndex);

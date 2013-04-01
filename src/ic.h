@@ -165,6 +165,18 @@ class IC {
   static inline void SetTargetAtAddress(Address address, Code* target);
   static void PostPatching(Address address, Code* target, Code* old_target);
 
+  virtual void UpdateMonomorphicIC(Handle<JSObject> receiver,
+                                   Handle<Code> handler,
+                                   Handle<String> name) {
+    set_target(*handler);
+  }
+  bool UpdatePolymorphicIC(State state,
+                           StrictModeFlag strict_mode,
+                           Handle<JSObject> receiver,
+                           Handle<String> name,
+                           Handle<Code> code);
+  void CopyICToMegamorphicCache(Handle<String> name);
+  bool IsTransitionedMapOfMonomorphicTarget(Map* receiver_map);
   void PatchCache(State state,
                   StrictModeFlag strict_mode,
                   Handle<JSObject> receiver,
@@ -377,9 +389,12 @@ class LoadIC: public IC {
                     State state,
                     Handle<Object> object,
                     Handle<String> name);
-  virtual Handle<Code> ComputeLoadMonomorphic(LookupResult* lookup,
-                                              Handle<JSObject> receiver,
-                                              Handle<String> name);
+  virtual void UpdateMonomorphicIC(Handle<JSObject> receiver,
+                                   Handle<Code> handler,
+                                   Handle<String> name);
+  virtual Handle<Code> ComputeLoadHandler(LookupResult* lookup,
+                                          Handle<JSObject> receiver,
+                                          Handle<String> name);
 
  private:
   // Stub accessors.
@@ -448,9 +463,12 @@ class KeyedLoadIC: public LoadIC {
   }
 
   // Update the inline cache.
-  virtual Handle<Code> ComputeLoadMonomorphic(LookupResult* lookup,
-                                              Handle<JSObject> receiver,
-                                              Handle<String> name);
+  virtual void UpdateMonomorphicIC(Handle<JSObject> receiver,
+                                   Handle<Code> handler,
+                                   Handle<String> name);
+  virtual Handle<Code> ComputeLoadHandler(LookupResult* lookup,
+                                          Handle<JSObject> receiver,
+                                          Handle<String> name);
   virtual void UpdateMegamorphicCache(Map* map, String* name, Code* code) { }
 
  private:
@@ -479,7 +497,7 @@ class KeyedLoadIC: public LoadIC {
 
 class StoreIC: public IC {
  public:
-  explicit StoreIC(Isolate* isolate) : IC(NO_EXTRA_FRAME, isolate) {
+  StoreIC(FrameDepth depth, Isolate* isolate) : IC(depth, isolate) {
     ASSERT(target()->is_store_stub() || target()->is_keyed_store_stub());
   }
 
@@ -568,44 +586,8 @@ enum KeyedStoreIncrementLength {
 
 class KeyedStoreIC: public StoreIC {
  public:
-  enum StubKind {
-    STORE_NO_TRANSITION,
-    STORE_TRANSITION_SMI_TO_OBJECT,
-    STORE_TRANSITION_SMI_TO_DOUBLE,
-    STORE_TRANSITION_DOUBLE_TO_OBJECT,
-    STORE_TRANSITION_HOLEY_SMI_TO_OBJECT,
-    STORE_TRANSITION_HOLEY_SMI_TO_DOUBLE,
-    STORE_TRANSITION_HOLEY_DOUBLE_TO_OBJECT,
-    STORE_AND_GROW_NO_TRANSITION,
-    STORE_AND_GROW_TRANSITION_SMI_TO_OBJECT,
-    STORE_AND_GROW_TRANSITION_SMI_TO_DOUBLE,
-    STORE_AND_GROW_TRANSITION_DOUBLE_TO_OBJECT,
-    STORE_AND_GROW_TRANSITION_HOLEY_SMI_TO_OBJECT,
-    STORE_AND_GROW_TRANSITION_HOLEY_SMI_TO_DOUBLE,
-    STORE_AND_GROW_TRANSITION_HOLEY_DOUBLE_TO_OBJECT
-  };
-
-  static const int kGrowICDelta = STORE_AND_GROW_NO_TRANSITION -
-      STORE_NO_TRANSITION;
-  STATIC_ASSERT(kGrowICDelta ==
-                STORE_AND_GROW_TRANSITION_SMI_TO_OBJECT -
-                STORE_TRANSITION_SMI_TO_OBJECT);
-  STATIC_ASSERT(kGrowICDelta ==
-                STORE_AND_GROW_TRANSITION_SMI_TO_DOUBLE -
-                STORE_TRANSITION_SMI_TO_DOUBLE);
-  STATIC_ASSERT(kGrowICDelta ==
-                STORE_AND_GROW_TRANSITION_DOUBLE_TO_OBJECT -
-                STORE_TRANSITION_DOUBLE_TO_OBJECT);
-
-  static inline StubKind GetGrowStubKind(StubKind stub_kind) {
-    if (stub_kind < STORE_AND_GROW_NO_TRANSITION) {
-      stub_kind = static_cast<StubKind>(static_cast<int>(stub_kind) +
-                                        kGrowICDelta);
-    }
-    return stub_kind;
-  }
-
-  explicit KeyedStoreIC(Isolate* isolate) : StoreIC(isolate) {
+  KeyedStoreIC(FrameDepth depth, Isolate* isolate)
+      : StoreIC(depth, isolate) {
     ASSERT(target()->is_keyed_store_stub());
   }
 
@@ -646,7 +628,7 @@ class KeyedStoreIC: public StoreIC {
   }
 
   Handle<Code> StoreElementStub(Handle<JSObject> receiver,
-                                StubKind stub_kind,
+                                KeyedAccessStoreMode store_mode,
                                 StrictModeFlag strict_mode);
 
  private:
@@ -676,27 +658,12 @@ class KeyedStoreIC: public StoreIC {
 
   static void Clear(Address address, Code* target);
 
-  StubKind GetStubKind(Handle<JSObject> receiver,
-                       Handle<Object> key,
-                       Handle<Object> value);
-
-  static bool IsTransitionStubKind(StubKind stub_kind) {
-    return stub_kind > STORE_NO_TRANSITION &&
-        stub_kind != STORE_AND_GROW_NO_TRANSITION;
-  }
-
-  static bool IsGrowStubKind(StubKind stub_kind) {
-    return stub_kind >= STORE_AND_GROW_NO_TRANSITION;
-  }
-
-  static StubKind GetNoTransitionStubKind(StubKind stub_kind) {
-    if (!IsTransitionStubKind(stub_kind)) return stub_kind;
-    if (IsGrowStubKind(stub_kind)) return STORE_AND_GROW_NO_TRANSITION;
-    return STORE_NO_TRANSITION;
-  }
+  KeyedAccessStoreMode GetStoreMode(Handle<JSObject> receiver,
+                                    Handle<Object> key,
+                                    Handle<Object> value);
 
   Handle<Map> ComputeTransitionedMap(Handle<JSObject> receiver,
-                                     StubKind stub_kind);
+                                     KeyedAccessStoreMode store_mode);
 
   friend class IC;
 };
@@ -764,6 +731,7 @@ class CompareIC: public IC {
     NUMBER,
     STRING,
     INTERNALIZED_STRING,
+    UNIQUE_NAME,    // Symbol or InternalizedString
     OBJECT,         // JSObject
     KNOWN_OBJECT,   // JSObject with specific map (faster check)
     GENERIC
@@ -819,8 +787,8 @@ class ToBooleanIC: public IC {
 enum InlinedSmiCheck { ENABLE_INLINED_SMI_CHECK, DISABLE_INLINED_SMI_CHECK };
 void PatchInlinedSmiCode(Address address, InlinedSmiCheck check);
 
-DECLARE_RUNTIME_FUNCTION(MaybeObject*, KeyedLoadIC_Miss);
 DECLARE_RUNTIME_FUNCTION(MaybeObject*, KeyedLoadIC_MissFromStubFailure);
+DECLARE_RUNTIME_FUNCTION(MaybeObject*, KeyedStoreIC_MissFromStubFailure);
 
 } }  // namespace v8::internal
 

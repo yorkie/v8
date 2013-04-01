@@ -70,11 +70,12 @@ Handle<FixedDoubleArray> Factory::NewFixedDoubleArray(int size,
 }
 
 
-Handle<StringDictionary> Factory::NewStringDictionary(int at_least_space_for) {
+Handle<NameDictionary> Factory::NewNameDictionary(int at_least_space_for) {
   ASSERT(0 <= at_least_space_for);
   CALL_HEAP_FUNCTION(isolate(),
-                     StringDictionary::Allocate(at_least_space_for),
-                     StringDictionary);
+                     NameDictionary::Allocate(isolate()->heap(),
+                                              at_least_space_for),
+                     NameDictionary);
 }
 
 
@@ -82,7 +83,8 @@ Handle<SeededNumberDictionary> Factory::NewSeededNumberDictionary(
     int at_least_space_for) {
   ASSERT(0 <= at_least_space_for);
   CALL_HEAP_FUNCTION(isolate(),
-                     SeededNumberDictionary::Allocate(at_least_space_for),
+                     SeededNumberDictionary::Allocate(isolate()->heap(),
+                                                      at_least_space_for),
                      SeededNumberDictionary);
 }
 
@@ -91,7 +93,8 @@ Handle<UnseededNumberDictionary> Factory::NewUnseededNumberDictionary(
     int at_least_space_for) {
   ASSERT(0 <= at_least_space_for);
   CALL_HEAP_FUNCTION(isolate(),
-                     UnseededNumberDictionary::Allocate(at_least_space_for),
+                     UnseededNumberDictionary::Allocate(isolate()->heap(),
+                                                        at_least_space_for),
                      UnseededNumberDictionary);
 }
 
@@ -99,7 +102,8 @@ Handle<UnseededNumberDictionary> Factory::NewUnseededNumberDictionary(
 Handle<ObjectHashSet> Factory::NewObjectHashSet(int at_least_space_for) {
   ASSERT(0 <= at_least_space_for);
   CALL_HEAP_FUNCTION(isolate(),
-                     ObjectHashSet::Allocate(at_least_space_for),
+                     ObjectHashSet::Allocate(isolate()->heap(),
+                                             at_least_space_for),
                      ObjectHashSet);
 }
 
@@ -107,7 +111,8 @@ Handle<ObjectHashSet> Factory::NewObjectHashSet(int at_least_space_for) {
 Handle<ObjectHashTable> Factory::NewObjectHashTable(int at_least_space_for) {
   ASSERT(0 <= at_least_space_for);
   CALL_HEAP_FUNCTION(isolate(),
-                     ObjectHashTable::Allocate(at_least_space_for),
+                     ObjectHashTable::Allocate(isolate()->heap(),
+                                               at_least_space_for),
                      ObjectHashTable);
 }
 
@@ -366,6 +371,12 @@ Handle<Struct> Factory::NewStruct(InstanceType type) {
       isolate(),
       isolate()->heap()->AllocateStruct(type),
       Struct);
+}
+
+
+Handle<DeclaredAccessorDescriptor> Factory::NewDeclaredAccessorDescriptor() {
+  return Handle<DeclaredAccessorDescriptor>::cast(
+      NewStruct(DECLARED_ACCESSOR_DESCRIPTOR_TYPE));
 }
 
 
@@ -692,9 +703,11 @@ Handle<Object> Factory::NewReferenceError(Handle<String> message) {
 }
 
 
-Handle<Object> Factory::NewError(const char* maker, const char* type,
-    Vector< Handle<Object> > args) {
-  v8::HandleScope scope;  // Instantiate a closeable HandleScope for EscapeFrom.
+Handle<Object> Factory::NewError(const char* maker,
+                                 const char* type,
+                                 Vector< Handle<Object> > args) {
+  // Instantiate a closeable HandleScope for EscapeFrom.
+  v8::HandleScope scope(reinterpret_cast<v8::Isolate*>(isolate()));
   Handle<FixedArray> array = NewFixedArray(args.length());
   for (int i = 0; i < args.length(); i++) {
     array->set(i, *args[i]);
@@ -1358,7 +1371,9 @@ Handle<JSFunction> Factory::CreateApiFunction(
 
 Handle<MapCache> Factory::NewMapCache(int at_least_space_for) {
   CALL_HEAP_FUNCTION(isolate(),
-                     MapCache::Allocate(at_least_space_for), MapCache);
+                     MapCache::Allocate(isolate()->heap(),
+                                        at_least_space_for),
+                     MapCache);
 }
 
 

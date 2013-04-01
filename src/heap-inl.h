@@ -320,8 +320,8 @@ bool Heap::InNewSpace(Object* object) {
 }
 
 
-bool Heap::InNewSpace(Address addr) {
-  return new_space_.Contains(addr);
+bool Heap::InNewSpace(Address address) {
+  return new_space_.Contains(address);
 }
 
 
@@ -332,6 +332,16 @@ bool Heap::InFromSpace(Object* object) {
 
 bool Heap::InToSpace(Object* object) {
   return new_space_.ToSpaceContains(object);
+}
+
+
+bool Heap::InOldPointerSpace(Address address) {
+  return old_pointer_space_->Contains(address);
+}
+
+
+bool Heap::InOldPointerSpace(Object* object) {
+  return InOldPointerSpace(reinterpret_cast<Address>(object));
 }
 
 
@@ -389,7 +399,9 @@ AllocationSpace Heap::TargetSpaceId(InstanceType type) {
   ASSERT(type != ODDBALL_TYPE);
   ASSERT(type != JS_GLOBAL_PROPERTY_CELL_TYPE);
 
-  if (type < FIRST_NONSTRING_TYPE) {
+  if (type <= LAST_NAME_TYPE) {
+    if (type == SYMBOL_TYPE) return OLD_POINTER_SPACE;
+    ASSERT(type < FIRST_NONSTRING_TYPE);
     // There are four string representations: sequential strings, external
     // strings, cons strings, and sliced strings.
     // Only the latter two contain non-map-word pointers to heap objects.
@@ -453,6 +465,15 @@ void Heap::ScavengeObject(HeapObject** p, HeapObject* object) {
 
   // Call the slow part of scavenge object.
   return ScavengeObjectSlow(p, object);
+}
+
+
+MaybeObject* Heap::AllocateEmptyJSArrayWithAllocationSite(
+      ElementsKind elements_kind,
+      Handle<Object> allocation_site_payload) {
+  return AllocateJSArrayAndStorageWithAllocationSite(elements_kind, 0, 0,
+      allocation_site_payload,
+      DONT_INITIALIZE_ARRAY_ELEMENTS);
 }
 
 
@@ -634,24 +655,12 @@ void ExternalStringTable::Verify() {
     // TODO(yangguo): check that the object is indeed an external string.
     ASSERT(heap_->InNewSpace(obj));
     ASSERT(obj != HEAP->the_hole_value());
-#ifndef ENABLE_LATIN_1
-    if (obj->IsExternalAsciiString()) {
-      ExternalAsciiString* string = ExternalAsciiString::cast(obj);
-      ASSERT(String::IsAscii(string->GetChars(), string->length()));
-    }
-#endif
   }
   for (int i = 0; i < old_space_strings_.length(); ++i) {
     Object* obj = Object::cast(old_space_strings_[i]);
     // TODO(yangguo): check that the object is indeed an external string.
     ASSERT(!heap_->InNewSpace(obj));
     ASSERT(obj != HEAP->the_hole_value());
-#ifndef ENABLE_LATIN_1
-    if (obj->IsExternalAsciiString()) {
-      ExternalAsciiString* string = ExternalAsciiString::cast(obj);
-      ASSERT(String::IsAscii(string->GetChars(), string->length()));
-    }
-#endif
   }
 #endif
 }

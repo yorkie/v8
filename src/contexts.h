@@ -103,6 +103,7 @@ enum BindingFlags {
   V(NUMBER_FUNCTION_INDEX, JSFunction, number_function) \
   V(STRING_FUNCTION_INDEX, JSFunction, string_function) \
   V(STRING_FUNCTION_PROTOTYPE_MAP_INDEX, Map, string_function_prototype_map) \
+  V(SYMBOL_FUNCTION_INDEX, JSFunction, symbol_function) \
   V(OBJECT_FUNCTION_INDEX, JSFunction, object_function) \
   V(INTERNAL_ARRAY_FUNCTION_INDEX, JSFunction, internal_array_function) \
   V(ARRAY_FUNCTION_INDEX, JSFunction, array_function) \
@@ -250,6 +251,7 @@ class Context: public FixedArray {
     NUMBER_FUNCTION_INDEX,
     STRING_FUNCTION_INDEX,
     STRING_FUNCTION_PROTOTYPE_MAP_INDEX,
+    SYMBOL_FUNCTION_INDEX,
     OBJECT_FUNCTION_INDEX,
     INTERNAL_ARRAY_FUNCTION_INDEX,
     ARRAY_FUNCTION_INDEX,

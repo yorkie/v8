@@ -160,7 +160,7 @@ namespace internal {
   V(Object, last_script_id, LastScriptId)                                      \
   V(Script, empty_script, EmptyScript)                                         \
   V(Smi, real_stack_limit, RealStackLimit)                                     \
-  V(StringDictionary, intrinsic_function_names, IntrinsicFunctionNames)        \
+  V(NameDictionary, intrinsic_function_names, IntrinsicFunctionNames)        \
   V(Smi, arguments_adaptor_deopt_pc_offset, ArgumentsAdaptorDeoptPCOffset)     \
   V(Smi, construct_stub_deopt_pc_offset, ConstructStubDeoptPCOffset)           \
   V(Smi, getter_stub_deopt_pc_offset, GetterStubDeoptPCOffset)                 \
@@ -213,6 +213,8 @@ namespace internal {
   V(prototype_string, "prototype")                                       \
   V(string_string, "string")                                             \
   V(String_string, "String")                                             \
+  V(symbol_string, "symbol")                                             \
+  V(Symbol_string, "Symbol")                                             \
   V(Date_string, "Date")                                                 \
   V(this_string, "this")                                                 \
   V(to_string_string, "toString")                                        \
@@ -220,14 +222,13 @@ namespace internal {
   V(undefined_string, "undefined")                                       \
   V(value_of_string, "valueOf")                                          \
   V(stack_string, "stack")                                               \
+  V(toJSON_string, "toJSON")                                             \
   V(InitializeVarGlobal_string, "InitializeVarGlobal")                   \
   V(InitializeConstGlobal_string, "InitializeConstGlobal")               \
   V(KeyedLoadElementMonomorphic_string,                                  \
     "KeyedLoadElementMonomorphic")                                       \
   V(KeyedStoreElementMonomorphic_string,                                 \
     "KeyedStoreElementMonomorphic")                                      \
-  V(KeyedStoreAndGrowElementMonomorphic_string,                          \
-    "KeyedStoreAndGrowElementMonomorphic")                               \
   V(stack_overflow_string, "kStackOverflowBoilerplate")                  \
   V(illegal_access_string, "illegal access")                             \
   V(out_of_memory_string, "out-of-memory")                               \
@@ -266,7 +267,7 @@ namespace internal {
   V(infinity_string, "Infinity")                                         \
   V(minus_infinity_string, "-Infinity")                                  \
   V(hidden_stack_trace_string, "v8::hidden_stack_trace")                 \
-  V(query_colon_string, "(?:)")                                          \
+  V(query_colon_string, "(?:)")
 
 // Forward declarations.
 class GCTracer;
@@ -522,6 +523,7 @@ class Heap {
   int InitialSemiSpaceSize() { return initial_semispace_size_; }
   intptr_t MaxOldGenerationSize() { return max_old_generation_size_; }
   intptr_t MaxExecutableSize() { return max_executable_size_; }
+  int MaxNewSpaceAllocationSize() { return InitialSemiSpaceSize() * 3/4; }
 
   // Returns the capacity of the heap in bytes w/o growing. Heap grows when
   // more spaces are needed until it reaches the limit.
@@ -592,6 +594,13 @@ class Heap {
     return new_space_.allocation_limit_address();
   }
 
+  Address* OldPointerSpaceAllocationTopAddress() {
+    return old_pointer_space_->allocation_top_address();
+  }
+  Address* OldPointerSpaceAllocationLimitAddress() {
+    return old_pointer_space_->allocation_limit_address();
+  }
+
   // Uncommit unused semi space.
   bool UncommitFromSpace() { return new_space_.UncommitFromSpace(); }
 
@@ -601,7 +610,12 @@ class Heap {
   // failed.
   // Please note this does not perform a garbage collection.
   MUST_USE_RESULT MaybeObject* AllocateJSObject(
-      JSFunction* constructor, PretenureFlag pretenure = NOT_TENURED);
+      JSFunction* constructor,
+      PretenureFlag pretenure = NOT_TENURED);
+
+  MUST_USE_RESULT MaybeObject* AllocateJSObjectWithAllocationSite(
+      JSFunction* constructor,
+      Handle<Object> allocation_site_info_payload);
 
   MUST_USE_RESULT MaybeObject* AllocateJSModule(Context* context,
                                                 ScopeInfo* scope_info);
@@ -615,6 +629,10 @@ class Heap {
                                      pretenure);
   }
 
+  inline MUST_USE_RESULT MaybeObject* AllocateEmptyJSArrayWithAllocationSite(
+      ElementsKind elements_kind,
+      Handle<Object> allocation_site_payload);
+
   // Allocate a JSArray with a specified length but elements that are left
   // uninitialized.
   MUST_USE_RESULT MaybeObject* AllocateJSArrayAndStorage(
@@ -623,6 +641,19 @@ class Heap {
       int capacity,
       ArrayStorageAllocationMode mode = DONT_INITIALIZE_ARRAY_ELEMENTS,
       PretenureFlag pretenure = NOT_TENURED);
+
+  MUST_USE_RESULT MaybeObject* AllocateJSArrayAndStorageWithAllocationSite(
+      ElementsKind elements_kind,
+      int length,
+      int capacity,
+      Handle<Object> allocation_site_payload,
+      ArrayStorageAllocationMode mode = DONT_INITIALIZE_ARRAY_ELEMENTS);
+
+  MUST_USE_RESULT MaybeObject* AllocateJSArrayStorage(
+      JSArray* array,
+      int length,
+      int capacity,
+      ArrayStorageAllocationMode mode = DONT_INITIALIZE_ARRAY_ELEMENTS);
 
   // Allocate a JSArray with no elements
   MUST_USE_RESULT MaybeObject* AllocateJSArrayWithElements(
@@ -640,9 +671,9 @@ class Heap {
   // Returns a deep copy of the JavaScript object.
   // Properties and elements are copied too.
   // Returns failure if allocation failed.
-  MUST_USE_RESULT MaybeObject* CopyJSObject(
-      JSObject* source,
-      AllocationSiteMode mode = DONT_TRACK_ALLOCATION_SITE);
+  MUST_USE_RESULT MaybeObject* CopyJSObject(JSObject* source);
+
+  MUST_USE_RESULT MaybeObject* CopyJSObjectWithAllocationSite(JSObject* source);
 
   // Allocates the function prototype.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
@@ -685,11 +716,17 @@ class Heap {
   MUST_USE_RESULT MaybeObject* AllocateJSObjectFromMap(
       Map* map, PretenureFlag pretenure = NOT_TENURED);
 
+  MUST_USE_RESULT MaybeObject* AllocateJSObjectFromMapWithAllocationSite(
+      Map* map, Handle<Object> allocation_site_info_payload);
+
   // Allocates a heap object based on the map.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this function does not perform a garbage collection.
   MUST_USE_RESULT MaybeObject* Allocate(Map* map, AllocationSpace space);
+
+  MUST_USE_RESULT MaybeObject* AllocateWithAllocationSite(Map* map,
+      AllocationSpace space, Handle<Object> allocation_site_info_payload);
 
   // Allocates a JS Map in the heap.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
@@ -845,12 +882,11 @@ class Heap {
       void* external_pointer,
       PretenureFlag pretenure);
 
-  // Allocate a symbol.
+  // Allocate a symbol in old space.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
   // failed.
   // Please note this does not perform a garbage collection.
-  MUST_USE_RESULT MaybeObject* AllocateSymbol(
-      PretenureFlag pretenure = NOT_TENURED);
+  MUST_USE_RESULT MaybeObject* AllocateSymbol();
 
   // Allocate a tenured JS global property cell.
   // Returns Failure::RetryAfterGC(requested_bytes, space) if the allocation
@@ -1284,10 +1320,14 @@ class Heap {
 
   // Returns whether the object resides in new space.
   inline bool InNewSpace(Object* object);
-  inline bool InNewSpace(Address addr);
-  inline bool InNewSpacePage(Address addr);
+  inline bool InNewSpace(Address address);
+  inline bool InNewSpacePage(Address address);
   inline bool InFromSpace(Object* object);
   inline bool InToSpace(Object* object);
+
+  // Returns whether the object resides in old pointer space.
+  inline bool InOldPointerSpace(Address address);
+  inline bool InOldPointerSpace(Object* object);
 
   // Checks whether an address/object in the heap (including auxiliary
   // area and unused area).
@@ -1669,6 +1709,12 @@ class Heap {
     return sweeping_complete;
   }
 
+  bool EnsureSweepersProgressed(int step_size) {
+    bool sweeping_complete = old_data_space()->EnsureSweeperProgress(step_size);
+    sweeping_complete &= old_pointer_space()->EnsureSweeperProgress(step_size);
+    return sweeping_complete;
+  }
+
   ExternalStringTable* external_string_table() {
     return &external_string_table_;
   }
@@ -1786,13 +1832,26 @@ class Heap {
     explicit RelocationLock(Heap* heap) : heap_(heap) {
       if (FLAG_parallel_recompilation) {
         heap_->relocation_mutex_->Lock();
+#ifdef DEBUG
+        heap_->relocation_mutex_locked_ = true;
+#endif  // DEBUG
       }
     }
+
     ~RelocationLock() {
       if (FLAG_parallel_recompilation) {
+#ifdef DEBUG
+        heap_->relocation_mutex_locked_ = false;
+#endif  // DEBUG
         heap_->relocation_mutex_->Unlock();
       }
     }
+
+#ifdef DEBUG
+    static bool IsLocked(Heap* heap) {
+      return heap->relocation_mutex_locked_;
+    }
+#endif  // DEBUG
 
    private:
     Heap* heap_;
@@ -2035,6 +2094,10 @@ class Heap {
       ElementsKind elements_kind,
       PretenureFlag pretenure = NOT_TENURED);
 
+  MUST_USE_RESULT MaybeObject* AllocateJSArrayWithAllocationSite(
+      ElementsKind elements_kind,
+      Handle<Object> allocation_site_info_payload);
+
   // Allocate empty fixed array.
   MUST_USE_RESULT MaybeObject* AllocateEmptyFixedArray();
 
@@ -2264,6 +2327,9 @@ class Heap {
   MemoryChunk* chunks_queued_for_free_;
 
   Mutex* relocation_mutex_;
+#ifdef DEBUG
+  bool relocation_mutex_locked_;
+#endif  // DEBUG;
 
   friend class Factory;
   friend class GCTracer;
@@ -2464,10 +2530,10 @@ class HeapIterator BASE_EMBEDDED {
 class KeyedLookupCache {
  public:
   // Lookup field offset for (map, name). If absent, -1 is returned.
-  int Lookup(Map* map, String* name);
+  int Lookup(Map* map, Name* name);
 
   // Update an element in the cache.
-  void Update(Map* map, String* name, int field_offset);
+  void Update(Map* map, Name* name, int field_offset);
 
   // Clear the cache.
   void Clear();
@@ -2492,7 +2558,7 @@ class KeyedLookupCache {
     }
   }
 
-  static inline int Hash(Map* map, String* name);
+  static inline int Hash(Map* map, Name* name);
 
   // Get the address of the keys and field_offsets arrays.  Used in
   // generated code to perform cache lookups.
@@ -2506,7 +2572,7 @@ class KeyedLookupCache {
 
   struct Key {
     Map* map;
-    String* name;
+    Name* name;
   };
 
   Key keys_[kLength];
@@ -2526,8 +2592,8 @@ class DescriptorLookupCache {
  public:
   // Lookup descriptor index for (map, name).
   // If absent, kAbsent is returned.
-  int Lookup(Map* source, String* name) {
-    if (!StringShape(name).IsInternalized()) return kAbsent;
+  int Lookup(Map* source, Name* name) {
+    if (!name->IsUniqueName()) return kAbsent;
     int index = Hash(source, name);
     Key& key = keys_[index];
     if ((key.source == source) && (key.name == name)) return results_[index];
@@ -2535,9 +2601,9 @@ class DescriptorLookupCache {
   }
 
   // Update an element in the cache.
-  void Update(Map* source, String* name, int result) {
+  void Update(Map* source, Name* name, int result) {
     ASSERT(result != kAbsent);
-    if (StringShape(name).IsInternalized()) {
+    if (name->IsUniqueName()) {
       int index = Hash(source, name);
       Key& key = keys_[index];
       key.source = source;
@@ -2560,7 +2626,7 @@ class DescriptorLookupCache {
     }
   }
 
-  static int Hash(Object* source, String* name) {
+  static int Hash(Object* source, Name* name) {
     // Uses only lower 32 bits if pointers are larger.
     uint32_t source_hash =
         static_cast<uint32_t>(reinterpret_cast<uintptr_t>(source))
@@ -2574,7 +2640,7 @@ class DescriptorLookupCache {
   static const int kLength = 64;
   struct Key {
     Map* source;
-    String* name;
+    Name* name;
   };
 
   Key keys_[kLength];

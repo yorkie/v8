@@ -349,6 +349,10 @@ class Expression: public AstNode {
     ASSERT(types != NULL && types->length() == 1);
     return types->at(0);
   }
+  virtual KeyedAccessStoreMode GetStoreMode() {
+    UNREACHABLE();
+    return STANDARD_STORE;
+  }
 
   BailoutId id() const { return id_; }
   TypeFeedbackId test_id() const { return test_id_; }
@@ -1183,8 +1187,8 @@ class Literal: public Expression {
     return Handle<String>::cast(handle_);
   }
 
-  virtual bool ToBooleanIsTrue() { return handle_->ToBoolean()->IsTrue(); }
-  virtual bool ToBooleanIsFalse() { return handle_->ToBoolean()->IsFalse(); }
+  virtual bool ToBooleanIsTrue() { return handle_->BooleanValue(); }
+  virtual bool ToBooleanIsFalse() { return !handle_->BooleanValue(); }
 
   // Identity testers.
   bool IsNull() const {
@@ -1481,7 +1485,9 @@ class Property: public Expression {
   void RecordTypeFeedback(TypeFeedbackOracle* oracle, Zone* zone);
   virtual bool IsMonomorphic() { return is_monomorphic_; }
   virtual SmallMapList* GetReceiverTypes() { return &receiver_types_; }
-  bool IsArrayLength() { return is_array_length_; }
+  virtual KeyedAccessStoreMode GetStoreMode() {
+    return STANDARD_STORE;
+  }
   bool IsUninitialized() { return is_uninitialized_; }
   TypeFeedbackId PropertyFeedbackId() { return reuse(id()); }
 
@@ -1497,7 +1503,6 @@ class Property: public Expression {
         load_id_(GetNextId(isolate)),
         is_monomorphic_(false),
         is_uninitialized_(false),
-        is_array_length_(false),
         is_string_length_(false),
         is_string_access_(false),
         is_function_prototype_(false) { }
@@ -1511,7 +1516,6 @@ class Property: public Expression {
   SmallMapList receiver_types_;
   bool is_monomorphic_ : 1;
   bool is_uninitialized_ : 1;
-  bool is_array_length_ : 1;
   bool is_string_length_ : 1;
   bool is_string_access_ : 1;
   bool is_function_prototype_ : 1;
@@ -1532,6 +1536,22 @@ class Call: public Expression {
   virtual SmallMapList* GetReceiverTypes() { return &receiver_types_; }
   virtual bool IsMonomorphic() { return is_monomorphic_; }
   CheckType check_type() const { return check_type_; }
+
+  void set_string_check(Handle<JSObject> holder) {
+    holder_ = holder;
+    check_type_ = STRING_CHECK;
+  }
+
+  void set_number_check(Handle<JSObject> holder) {
+    holder_ = holder;
+    check_type_ = NUMBER_CHECK;
+  }
+
+  void set_map_check() {
+    holder_ = Handle<JSObject>::null();
+    check_type_ = RECEIVER_MAP_CHECK;
+  }
+
   Handle<JSFunction> target() { return target_; }
 
   // A cache for the holder, set as a side effect of computing the target of the
@@ -1595,6 +1615,7 @@ class CallNew: public Expression {
   Handle<JSFunction> target() { return target_; }
 
   BailoutId ReturnId() const { return return_id_; }
+  ElementsKind elements_kind() const { return elements_kind_; }
 
  protected:
   CallNew(Isolate* isolate,
@@ -1606,7 +1627,8 @@ class CallNew: public Expression {
         arguments_(arguments),
         pos_(pos),
         is_monomorphic_(false),
-        return_id_(GetNextId(isolate)) { }
+        return_id_(GetNextId(isolate)),
+        elements_kind_(GetInitialFastElementsKind()) { }
 
  private:
   Expression* expression_;
@@ -1617,6 +1639,7 @@ class CallNew: public Expression {
   Handle<JSFunction> target_;
 
   const BailoutId return_id_;
+  ElementsKind elements_kind_;
 };
 
 
@@ -1754,6 +1777,9 @@ class CountOperation: public Expression {
   void RecordTypeFeedback(TypeFeedbackOracle* oracle, Zone* znoe);
   virtual bool IsMonomorphic() { return is_monomorphic_; }
   virtual SmallMapList* GetReceiverTypes() { return &receiver_types_; }
+  virtual KeyedAccessStoreMode GetStoreMode() {
+    return store_mode_;
+  }
 
   BailoutId AssignmentId() const { return assignment_id_; }
 
@@ -1769,6 +1795,8 @@ class CountOperation: public Expression {
       : Expression(isolate),
         op_(op),
         is_prefix_(is_prefix),
+        is_monomorphic_(false),
+        store_mode_(STANDARD_STORE),
         expression_(expr),
         pos_(pos),
         assignment_id_(GetNextId(isolate)),
@@ -1776,8 +1804,9 @@ class CountOperation: public Expression {
 
  private:
   Token::Value op_;
-  bool is_prefix_;
-  bool is_monomorphic_;
+  bool is_prefix_ : 1;
+  bool is_monomorphic_ : 1;
+  KeyedAccessStoreMode store_mode_: 4;
   Expression* expression_;
   int pos_;
   const BailoutId assignment_id_;
@@ -1890,6 +1919,9 @@ class Assignment: public Expression {
   void RecordTypeFeedback(TypeFeedbackOracle* oracle, Zone* zone);
   virtual bool IsMonomorphic() { return is_monomorphic_; }
   virtual SmallMapList* GetReceiverTypes() { return &receiver_types_; }
+  virtual KeyedAccessStoreMode GetStoreMode() {
+    return store_mode_;
+  }
 
  protected:
   Assignment(Isolate* isolate,
@@ -1915,7 +1947,8 @@ class Assignment: public Expression {
   BinaryOperation* binary_operation_;
   const BailoutId assignment_id_;
 
-  bool is_monomorphic_;
+  bool is_monomorphic_ : 1;
+  KeyedAccessStoreMode store_mode_ : 4;
   SmallMapList receiver_types_;
 };
 

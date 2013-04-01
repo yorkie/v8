@@ -47,7 +47,6 @@ namespace internal {
   V(Compare)                             \
   V(CompareIC)                           \
   V(MathPow)                             \
-  V(ArrayLength)                         \
   V(StringLength)                        \
   V(FunctionPrototype)                   \
   V(StoreArrayLength)                    \
@@ -73,14 +72,19 @@ namespace internal {
   V(CEntry)                              \
   V(JSEntry)                             \
   V(KeyedLoadElement)                    \
+  V(ArrayNoArgumentConstructor)          \
+  V(ArraySingleArgumentConstructor)      \
+  V(ArrayNArgumentsConstructor)          \
   V(KeyedStoreElement)                   \
   V(DebuggerStatement)                   \
-  V(StringDictionaryLookup)              \
+  V(NameDictionaryLookup)                \
   V(ElementsTransitionAndStore)          \
   V(TransitionElementsKind)              \
   V(StoreArrayLiteralElement)            \
   V(StubFailureTrampoline)               \
-  V(ProfileEntryHook)
+  V(ProfileEntryHook)                    \
+  /* IC Handler stubs */                 \
+  V(LoadField)
 
 // List of code stubs only used on ARM platforms.
 #ifdef V8_TARGET_ARCH_ARM
@@ -144,10 +148,10 @@ class CodeStub BASE_EMBEDDED {
 
   virtual ~CodeStub() {}
 
-  bool CompilingCallsToThisStubIsGCSafe() {
+  bool CompilingCallsToThisStubIsGCSafe(Isolate* isolate) {
     bool is_pregenerated = IsPregenerated();
     Code* code = NULL;
-    CHECK(!is_pregenerated || FindCodeInCache(&code, Isolate::Current()));
+    CHECK(!is_pregenerated || FindCodeInCache(&code, isolate));
     return is_pregenerated;
   }
 
@@ -184,6 +188,9 @@ class CodeStub BASE_EMBEDDED {
   }
   virtual Code::ExtraICState GetExtraICState() {
     return Code::kNoExtraICState;
+  }
+  virtual Code::StubType GetStubType() {
+    return Code::NORMAL;
   }
 
   // Returns whether the code generated for this stub needs to be allocated as
@@ -243,6 +250,7 @@ class PlatformCodeStub : public CodeStub {
   virtual Handle<Code> GenerateCode();
 
   virtual int GetCodeKind() { return Code::STUB; }
+  virtual int GetStubFlags() { return -1; }
 
  protected:
   // Generates the assembler code for the stub.
@@ -261,6 +269,13 @@ struct CodeStubInterfaceDescriptor {
   int extra_expression_stack_count_;
   Register* register_params_;
   Address deoptimization_handler_;
+
+  int environment_length() const {
+    if (stack_parameter_count_ != NULL) {
+      return register_param_count_ + 1;
+    }
+    return register_param_count_;
+  }
 };
 
 
@@ -581,16 +596,6 @@ class ICStub: public PlatformCodeStub {
 };
 
 
-class ArrayLengthStub: public ICStub {
- public:
-  explicit ArrayLengthStub(Code::Kind kind) : ICStub(kind) { }
-  virtual void Generate(MacroAssembler* masm);
-
- private:
-  virtual CodeStub::Major MajorKey() { return ArrayLength; }
-};
-
-
 class FunctionPrototypeStub: public ICStub {
  public:
   explicit FunctionPrototypeStub(Code::Kind kind) : ICStub(kind) { }
@@ -608,6 +613,7 @@ class StringLengthStub: public ICStub {
   virtual void Generate(MacroAssembler* masm);
 
  private:
+  STATIC_ASSERT(KindBits::kSize == 4);
   class WrapperModeBits: public BitField<bool, 4, 1> {};
   virtual CodeStub::Major MajorKey() { return StringLength; }
   virtual int MinorKey() {
@@ -629,6 +635,7 @@ class StoreICStub: public ICStub {
   }
 
  private:
+  STATIC_ASSERT(KindBits::kSize == 4);
   class StrictModeBits: public BitField<bool, 4, 1> {};
   virtual int MinorKey() {
     return KindBits::encode(kind()) | StrictModeBits::encode(strict_mode_);
@@ -646,6 +653,45 @@ class StoreArrayLengthStub: public StoreICStub {
 
  private:
   virtual CodeStub::Major MajorKey() { return StoreArrayLength; }
+};
+
+
+class HandlerStub: public ICStub {
+ public:
+  explicit HandlerStub(Code::Kind kind) : ICStub(kind) { }
+  virtual int GetCodeKind() { return Code::STUB; }
+  virtual int GetStubFlags() { return kind(); }
+};
+
+
+class LoadFieldStub: public HandlerStub {
+ public:
+  LoadFieldStub(Register reg, bool inobject, int index)
+      : HandlerStub(Code::LOAD_IC),
+        reg_(reg),
+        inobject_(inobject),
+        index_(index) { }
+  virtual void Generate(MacroAssembler* masm);
+
+ protected:
+  virtual Code::StubType GetStubType() { return Code::FIELD; }
+
+ private:
+  STATIC_ASSERT(KindBits::kSize == 4);
+  class RegisterBits: public BitField<int, 4, 6> {};
+  class InobjectBits: public BitField<bool, 10, 1> {};
+  class IndexBits: public BitField<int, 11, 11> {};
+  virtual CodeStub::Major MajorKey() { return LoadField; }
+  virtual int MinorKey() {
+    return KindBits::encode(kind())
+        | RegisterBits::encode(reg_.code())
+        | InobjectBits::encode(inobject_)
+        | IndexBits::encode(index_);
+  }
+
+  Register reg_;
+  bool inobject_;
+  int index_;
 };
 
 
@@ -794,9 +840,9 @@ class ICCompareStub: public PlatformCodeStub {
 
  private:
   class OpField: public BitField<int, 0, 3> { };
-  class LeftStateField: public BitField<int, 3, 3> { };
-  class RightStateField: public BitField<int, 6, 3> { };
-  class HandlerStateField: public BitField<int, 9, 3> { };
+  class LeftStateField: public BitField<int, 3, 4> { };
+  class RightStateField: public BitField<int, 7, 4> { };
+  class HandlerStateField: public BitField<int, 11, 4> { };
 
   virtual void FinishCode(Handle<Code> code) {
     code->set_stub_info(MinorKey());
@@ -811,6 +857,7 @@ class ICCompareStub: public PlatformCodeStub {
   void GenerateNumbers(MacroAssembler* masm);
   void GenerateInternalizedStrings(MacroAssembler* masm);
   void GenerateStrings(MacroAssembler* masm);
+  void GenerateUniqueNames(MacroAssembler* masm);
   void GenerateObjects(MacroAssembler* masm);
   void GenerateMiss(MacroAssembler* masm);
   void GenerateKnownObjects(MacroAssembler* masm);
@@ -1254,6 +1301,47 @@ class KeyedLoadFastElementStub : public HydrogenCodeStub {
 };
 
 
+class KeyedStoreFastElementStub : public HydrogenCodeStub {
+ public:
+  KeyedStoreFastElementStub(bool is_js_array,
+                            ElementsKind elements_kind,
+                            KeyedAccessStoreMode mode) {
+    bit_field_ = ElementsKindBits::encode(elements_kind) |
+        IsJSArrayBits::encode(is_js_array) |
+        StoreModeBits::encode(mode);
+  }
+
+  Major MajorKey() { return KeyedStoreElement; }
+  int MinorKey() { return bit_field_; }
+
+  bool is_js_array() const {
+    return IsJSArrayBits::decode(bit_field_);
+  }
+
+  ElementsKind elements_kind() const {
+    return ElementsKindBits::decode(bit_field_);
+  }
+
+  KeyedAccessStoreMode store_mode() const {
+    return StoreModeBits::decode(bit_field_);
+  }
+
+  virtual Handle<Code> GenerateCode();
+
+  virtual void InitializeInterfaceDescriptor(
+      Isolate* isolate,
+      CodeStubInterfaceDescriptor* descriptor);
+
+ private:
+  class ElementsKindBits: public BitField<ElementsKind,      0, 8> {};
+  class StoreModeBits: public BitField<KeyedAccessStoreMode, 8, 4> {};
+  class IsJSArrayBits: public BitField<bool,                12, 1> {};
+  uint32_t bit_field_;
+
+  DISALLOW_COPY_AND_ASSIGN(KeyedStoreFastElementStub);
+};
+
+
 class TransitionElementsKindStub : public HydrogenCodeStub {
  public:
   TransitionElementsKindStub(ElementsKind from_kind,
@@ -1288,35 +1376,92 @@ class TransitionElementsKindStub : public HydrogenCodeStub {
 };
 
 
+class ArrayNoArgumentConstructorStub : public HydrogenCodeStub {
+ public:
+  ArrayNoArgumentConstructorStub() {
+  }
+
+  Major MajorKey() { return ArrayNoArgumentConstructor; }
+  int MinorKey() { return 0; }
+
+  virtual Handle<Code> GenerateCode();
+
+  virtual void InitializeInterfaceDescriptor(
+      Isolate* isolate,
+      CodeStubInterfaceDescriptor* descriptor);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(ArrayNoArgumentConstructorStub);
+};
+
+
+class ArraySingleArgumentConstructorStub : public HydrogenCodeStub {
+ public:
+  ArraySingleArgumentConstructorStub() {
+  }
+
+  Major MajorKey() { return ArraySingleArgumentConstructor; }
+  int MinorKey() { return 0; }
+
+  virtual Handle<Code> GenerateCode();
+
+  virtual void InitializeInterfaceDescriptor(
+      Isolate* isolate,
+      CodeStubInterfaceDescriptor* descriptor);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(ArraySingleArgumentConstructorStub);
+};
+
+
+class ArrayNArgumentsConstructorStub : public HydrogenCodeStub {
+ public:
+  ArrayNArgumentsConstructorStub() {
+  }
+
+  Major MajorKey() { return ArrayNArgumentsConstructor; }
+  int MinorKey() { return 0; }
+
+  virtual Handle<Code> GenerateCode();
+
+  virtual void InitializeInterfaceDescriptor(
+      Isolate* isolate,
+      CodeStubInterfaceDescriptor* descriptor);
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(ArrayNArgumentsConstructorStub);
+};
+
+
 class KeyedStoreElementStub : public PlatformCodeStub {
  public:
   KeyedStoreElementStub(bool is_js_array,
                         ElementsKind elements_kind,
-                        KeyedAccessGrowMode grow_mode)
+                        KeyedAccessStoreMode store_mode)
       : is_js_array_(is_js_array),
         elements_kind_(elements_kind),
-        grow_mode_(grow_mode),
+        store_mode_(store_mode),
         fp_registers_(CanUseFPRegisters()) { }
 
   Major MajorKey() { return KeyedStoreElement; }
   int MinorKey() {
     return ElementsKindBits::encode(elements_kind_) |
         IsJSArrayBits::encode(is_js_array_) |
-        GrowModeBits::encode(grow_mode_) |
+        StoreModeBits::encode(store_mode_) |
         FPRegisters::encode(fp_registers_);
   }
 
   void Generate(MacroAssembler* masm);
 
  private:
-  class ElementsKindBits: public BitField<ElementsKind,    0, 8> {};
-  class GrowModeBits: public BitField<KeyedAccessGrowMode, 8, 1> {};
-  class IsJSArrayBits: public BitField<bool,               9, 1> {};
-  class FPRegisters: public BitField<bool,                10, 1> {};
+  class ElementsKindBits: public BitField<ElementsKind,      0, 8> {};
+  class StoreModeBits: public BitField<KeyedAccessStoreMode, 8, 4> {};
+  class IsJSArrayBits: public BitField<bool,                12, 1> {};
+  class FPRegisters: public BitField<bool,                  13, 1> {};
 
   bool is_js_array_;
   ElementsKind elements_kind_;
-  KeyedAccessGrowMode grow_mode_;
+  KeyedAccessStoreMode store_mode_;
   bool fp_registers_;
 
   DISALLOW_COPY_AND_ASSIGN(KeyedStoreElementStub);
@@ -1332,6 +1477,7 @@ class ToBooleanStub: public PlatformCodeStub {
     SMI,
     SPEC_OBJECT,
     STRING,
+    SYMBOL,
     HEAP_NUMBER,
     NUMBER_OF_TYPES
   };
@@ -1399,19 +1545,19 @@ class ElementsTransitionAndStoreStub : public PlatformCodeStub {
                                  ElementsKind to,
                                  bool is_jsarray,
                                  StrictModeFlag strict_mode,
-                                 KeyedAccessGrowMode grow_mode)
+                                 KeyedAccessStoreMode store_mode)
       : from_(from),
         to_(to),
         is_jsarray_(is_jsarray),
         strict_mode_(strict_mode),
-        grow_mode_(grow_mode) {}
+        store_mode_(store_mode) {}
 
  private:
-  class FromBits:       public BitField<ElementsKind,      0, 8> {};
-  class ToBits:         public BitField<ElementsKind,      8, 8> {};
-  class IsJSArrayBits:  public BitField<bool,              16, 1> {};
-  class StrictModeBits: public BitField<StrictModeFlag,    17, 1> {};
-  class GrowModeBits: public BitField<KeyedAccessGrowMode, 18, 1> {};
+  class FromBits:       public BitField<ElementsKind,        0, 8> {};
+  class ToBits:         public BitField<ElementsKind,        8, 8> {};
+  class IsJSArrayBits:  public BitField<bool,                16, 1> {};
+  class StrictModeBits: public BitField<StrictModeFlag,      17, 1> {};
+  class StoreModeBits: public BitField<KeyedAccessStoreMode, 18, 4> {};
 
   Major MajorKey() { return ElementsTransitionAndStore; }
   int MinorKey() {
@@ -1419,7 +1565,7 @@ class ElementsTransitionAndStoreStub : public PlatformCodeStub {
         ToBits::encode(to_) |
         IsJSArrayBits::encode(is_jsarray_) |
         StrictModeBits::encode(strict_mode_) |
-        GrowModeBits::encode(grow_mode_);
+        StoreModeBits::encode(store_mode_);
   }
 
   void Generate(MacroAssembler* masm);
@@ -1428,7 +1574,7 @@ class ElementsTransitionAndStoreStub : public PlatformCodeStub {
   ElementsKind to_;
   bool is_jsarray_;
   StrictModeFlag strict_mode_;
-  KeyedAccessGrowMode grow_mode_;
+  KeyedAccessStoreMode store_mode_;
 
   DISALLOW_COPY_AND_ASSIGN(ElementsTransitionAndStoreStub);
 };

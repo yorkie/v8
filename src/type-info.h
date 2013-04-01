@@ -255,6 +255,8 @@ class TypeFeedbackOracle: public ZoneObject {
   Handle<Map> LoadMonomorphicReceiverType(Property* expr);
   Handle<Map> StoreMonomorphicReceiverType(TypeFeedbackId ast_id);
 
+  KeyedAccessStoreMode GetStoreMode(TypeFeedbackId ast_id);
+
   void LoadReceiverTypes(Property* expr,
                          Handle<String> name,
                          SmallMapList* types);
@@ -272,11 +274,14 @@ class TypeFeedbackOracle: public ZoneObject {
   static bool CanRetainOtherContext(JSFunction* function,
                                     Context* native_context);
 
+  void CollectPolymorphicMaps(Handle<Code> code, SmallMapList* types);
+
   CheckType GetCallCheckType(Call* expr);
   Handle<JSObject> GetPrototypeForPrimitiveCheck(CheckType check);
 
   Handle<JSFunction> GetCallTarget(Call* expr);
   Handle<JSFunction> GetCallNewTarget(CallNew* expr);
+  ElementsKind GetCallNewElementsKind(CallNew* expr);
 
   Handle<Map> GetObjectLiteralStoreMap(ObjectLiteral::Property* prop);
 
@@ -323,12 +328,16 @@ class TypeFeedbackOracle: public ZoneObject {
 
   // Returns an element from the backing store. Returns undefined if
   // there is no information.
+ public:
+  // TODO(mvstanton): how to get this information without making the method
+  // public?
   Handle<Object> GetInfo(TypeFeedbackId ast_id);
 
+ private:
   Handle<Context> native_context_;
   Isolate* isolate_;
-  Handle<UnseededNumberDictionary> dictionary_;
   Zone* zone_;
+  Handle<UnseededNumberDictionary> dictionary_;
 
   DISALLOW_COPY_AND_ASSIGN(TypeFeedbackOracle);
 };

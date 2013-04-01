@@ -853,7 +853,7 @@ void MacroAssembler::MultiPopReversed(RegList regs) {
 
 
 void MacroAssembler::MultiPushFPU(RegList regs) {
-  CpuFeatures::Scope scope(FPU);
+  CpuFeatureScope scope(this, FPU);
   int16_t num_to_push = NumberOfBitsSet(regs);
   int16_t stack_offset = num_to_push * kDoubleSize;
 
@@ -868,7 +868,7 @@ void MacroAssembler::MultiPushFPU(RegList regs) {
 
 
 void MacroAssembler::MultiPushReversedFPU(RegList regs) {
-  CpuFeatures::Scope scope(FPU);
+  CpuFeatureScope scope(this, FPU);
   int16_t num_to_push = NumberOfBitsSet(regs);
   int16_t stack_offset = num_to_push * kDoubleSize;
 
@@ -883,7 +883,7 @@ void MacroAssembler::MultiPushReversedFPU(RegList regs) {
 
 
 void MacroAssembler::MultiPopFPU(RegList regs) {
-  CpuFeatures::Scope scope(FPU);
+  CpuFeatureScope scope(this, FPU);
   int16_t stack_offset = 0;
 
   for (int16_t i = 0; i < kNumRegisters; i++) {
@@ -897,7 +897,7 @@ void MacroAssembler::MultiPopFPU(RegList regs) {
 
 
 void MacroAssembler::MultiPopReversedFPU(RegList regs) {
-  CpuFeatures::Scope scope(FPU);
+  CpuFeatureScope scope(this, FPU);
   int16_t stack_offset = 0;
 
   for (int16_t i = kNumRegisters - 1; i >= 0; i--) {
@@ -1108,6 +1108,7 @@ void MacroAssembler::BranchF(Label* target,
                              FPURegister cmp1,
                              FPURegister cmp2,
                              BranchDelaySlot bd) {
+  BlockTrampolinePoolScope block_trampoline_pool(this);
   if (cc == al) {
     Branch(bd, target);
     return;
@@ -1125,23 +1126,19 @@ void MacroAssembler::BranchF(Label* target,
     // have been handled by the caller.
     // Unsigned conditions are treated as their signed counterpart.
     switch (cc) {
-      case Uless:
-      case less:
+      case lt:
         c(OLT, D, cmp1, cmp2);
         bc1t(target);
         break;
-      case Ugreater:
-      case greater:
+      case gt:
         c(ULE, D, cmp1, cmp2);
         bc1f(target);
         break;
-      case Ugreater_equal:
-      case greater_equal:
+      case ge:
         c(ULT, D, cmp1, cmp2);
         bc1f(target);
         break;
-      case Uless_equal:
-      case less_equal:
+      case le:
         c(OLE, D, cmp1, cmp2);
         bc1t(target);
         break;
@@ -1149,8 +1146,16 @@ void MacroAssembler::BranchF(Label* target,
         c(EQ, D, cmp1, cmp2);
         bc1t(target);
         break;
+      case ueq:
+        c(UEQ, D, cmp1, cmp2);
+        bc1t(target);
+        break;
       case ne:
         c(EQ, D, cmp1, cmp2);
+        bc1f(target);
+        break;
+      case nue:
+        c(UEQ, D, cmp1, cmp2);
         bc1f(target);
         break;
       default:
@@ -1165,7 +1170,7 @@ void MacroAssembler::BranchF(Label* target,
 
 
 void MacroAssembler::Move(FPURegister dst, double imm) {
-  ASSERT(CpuFeatures::IsEnabled(FPU));
+  ASSERT(IsEnabled(FPU));
   static const DoubleRepresentation minus_zero(-0.0);
   static const DoubleRepresentation zero(0.0);
   DoubleRepresentation value(imm);
@@ -1345,7 +1350,7 @@ void MacroAssembler::ConvertToInt32(Register source,
   }
   bind(&right_exponent);
   if (CpuFeatures::IsSupported(FPU)) {
-    CpuFeatures::Scope scope(FPU);
+    CpuFeatureScope scope(this, FPU);
     // MIPS FPU instructions implementing double precision to integer
     // conversion using round to zero. Since the FP value was qualified
     // above, the resulting integer should be a legal int32.
@@ -1406,7 +1411,7 @@ void MacroAssembler::EmitFPUTruncate(FPURoundingMode rounding_mode,
   ASSERT(!except_flag.is(scratch));
 
   ASSERT(CpuFeatures::IsSupported(FPU));
-  CpuFeatures::Scope scope(FPU);
+  CpuFeatureScope scope(this, FPU);
   Label done;
 
   // Clear the except flag (0 = no exception)
@@ -1548,7 +1553,7 @@ void MacroAssembler::EmitECMATruncate(Register result,
                                       Register scratch,
                                       Register scratch2,
                                       Register scratch3) {
-  CpuFeatures::Scope scope(FPU);
+  CpuFeatureScope scope(this, FPU);
   ASSERT(!scratch2.is(result));
   ASSERT(!scratch3.is(result));
   ASSERT(!scratch3.is(scratch2));
@@ -1696,6 +1701,7 @@ void MacroAssembler::BranchShort(int16_t offset, Condition cond, Register rs,
   if (rt.is_reg()) {
     // NOTE: 'at' can be clobbered by Branch but it is legal to use it as rs or
     // rt.
+    BlockTrampolinePoolScope block_trampoline_pool(this);
     r2 = rt.rm_;
     switch (cond) {
       case cc_always:
@@ -1781,6 +1787,7 @@ void MacroAssembler::BranchShort(int16_t offset, Condition cond, Register rs,
     // Be careful to always use shifted_branch_offset only just before the
     // branch instruction, as the location will be remember for patching the
     // target.
+    BlockTrampolinePoolScope block_trampoline_pool(this);
     switch (cond) {
       case cc_always:
         b(offset);
@@ -1921,10 +1928,11 @@ void MacroAssembler::BranchShort(Label* L, Condition cond, Register rs,
                                  BranchDelaySlot bdslot) {
   BRANCH_ARGS_CHECK(cond, rs, rt);
 
-  int32_t offset;
+  int32_t offset = 0;
   Register r2 = no_reg;
   Register scratch = at;
   if (rt.is_reg()) {
+    BlockTrampolinePoolScope block_trampoline_pool(this);
     r2 = rt.rm_;
     // Be careful to always use shifted_branch_offset only just before the
     // branch instruction, as the location will be remember for patching the
@@ -2031,6 +2039,7 @@ void MacroAssembler::BranchShort(Label* L, Condition cond, Register rs,
     // Be careful to always use shifted_branch_offset only just before the
     // branch instruction, as the location will be remember for patching the
     // target.
+    BlockTrampolinePoolScope block_trampoline_pool(this);
     switch (cond) {
       case cc_always:
         offset = shifted_branch_offset(L, false);
@@ -2267,67 +2276,70 @@ void MacroAssembler::BranchAndLinkShort(int16_t offset, Condition cond,
     li(r2, rt);
   }
 
-  switch (cond) {
-    case cc_always:
-      bal(offset);
-      break;
-    case eq:
-      bne(rs, r2, 2);
-      nop();
-      bal(offset);
-      break;
-    case ne:
-      beq(rs, r2, 2);
-      nop();
-      bal(offset);
-      break;
+  {
+    BlockTrampolinePoolScope block_trampoline_pool(this);
+    switch (cond) {
+      case cc_always:
+        bal(offset);
+        break;
+      case eq:
+        bne(rs, r2, 2);
+        nop();
+        bal(offset);
+        break;
+      case ne:
+        beq(rs, r2, 2);
+        nop();
+        bal(offset);
+        break;
 
-    // Signed comparison.
-    case greater:
-      slt(scratch, r2, rs);
-      addiu(scratch, scratch, -1);
-      bgezal(scratch, offset);
-      break;
-    case greater_equal:
-      slt(scratch, rs, r2);
-      addiu(scratch, scratch, -1);
-      bltzal(scratch, offset);
-      break;
-    case less:
-      slt(scratch, rs, r2);
-      addiu(scratch, scratch, -1);
-      bgezal(scratch, offset);
-      break;
-    case less_equal:
-      slt(scratch, r2, rs);
-      addiu(scratch, scratch, -1);
-      bltzal(scratch, offset);
-      break;
+      // Signed comparison.
+      case greater:
+        slt(scratch, r2, rs);
+        addiu(scratch, scratch, -1);
+        bgezal(scratch, offset);
+        break;
+      case greater_equal:
+        slt(scratch, rs, r2);
+        addiu(scratch, scratch, -1);
+        bltzal(scratch, offset);
+        break;
+      case less:
+        slt(scratch, rs, r2);
+        addiu(scratch, scratch, -1);
+        bgezal(scratch, offset);
+        break;
+      case less_equal:
+        slt(scratch, r2, rs);
+        addiu(scratch, scratch, -1);
+        bltzal(scratch, offset);
+        break;
 
-    // Unsigned comparison.
-    case Ugreater:
-      sltu(scratch, r2, rs);
-      addiu(scratch, scratch, -1);
-      bgezal(scratch, offset);
-      break;
-    case Ugreater_equal:
-      sltu(scratch, rs, r2);
-      addiu(scratch, scratch, -1);
-      bltzal(scratch, offset);
-      break;
-    case Uless:
-      sltu(scratch, rs, r2);
-      addiu(scratch, scratch, -1);
-      bgezal(scratch, offset);
-      break;
-    case Uless_equal:
-      sltu(scratch, r2, rs);
-      addiu(scratch, scratch, -1);
-      bltzal(scratch, offset);
-      break;
+      // Unsigned comparison.
+      case Ugreater:
+        sltu(scratch, r2, rs);
+        addiu(scratch, scratch, -1);
+        bgezal(scratch, offset);
+        break;
+      case Ugreater_equal:
+        sltu(scratch, rs, r2);
+        addiu(scratch, scratch, -1);
+        bltzal(scratch, offset);
+        break;
+      case Uless:
+        sltu(scratch, rs, r2);
+        addiu(scratch, scratch, -1);
+        bgezal(scratch, offset);
+        break;
+      case Uless_equal:
+        sltu(scratch, r2, rs);
+        addiu(scratch, scratch, -1);
+        bltzal(scratch, offset);
+        break;
 
-    default:
-      UNREACHABLE();
+      default:
+        UNREACHABLE();
+    }
   }
   // Emit a nop in the branch delay slot if required.
   if (bdslot == PROTECT)
@@ -2349,7 +2361,7 @@ void MacroAssembler::BranchAndLinkShort(Label* L, Condition cond, Register rs,
                                         BranchDelaySlot bdslot) {
   BRANCH_ARGS_CHECK(cond, rs, rt);
 
-  int32_t offset;
+  int32_t offset = 0;
   Register r2 = no_reg;
   Register scratch = at;
   if (rt.is_reg()) {
@@ -2359,80 +2371,82 @@ void MacroAssembler::BranchAndLinkShort(Label* L, Condition cond, Register rs,
     li(r2, rt);
   }
 
-  switch (cond) {
-    case cc_always:
-      offset = shifted_branch_offset(L, false);
-      bal(offset);
-      break;
-    case eq:
-      bne(rs, r2, 2);
-      nop();
-      offset = shifted_branch_offset(L, false);
-      bal(offset);
-      break;
-    case ne:
-      beq(rs, r2, 2);
-      nop();
-      offset = shifted_branch_offset(L, false);
-      bal(offset);
-      break;
+  {
+    BlockTrampolinePoolScope block_trampoline_pool(this);
+    switch (cond) {
+      case cc_always:
+        offset = shifted_branch_offset(L, false);
+        bal(offset);
+        break;
+      case eq:
+        bne(rs, r2, 2);
+        nop();
+        offset = shifted_branch_offset(L, false);
+        bal(offset);
+        break;
+      case ne:
+        beq(rs, r2, 2);
+        nop();
+        offset = shifted_branch_offset(L, false);
+        bal(offset);
+        break;
 
-    // Signed comparison.
-    case greater:
-      slt(scratch, r2, rs);
-      addiu(scratch, scratch, -1);
-      offset = shifted_branch_offset(L, false);
-      bgezal(scratch, offset);
-      break;
-    case greater_equal:
-      slt(scratch, rs, r2);
-      addiu(scratch, scratch, -1);
-      offset = shifted_branch_offset(L, false);
-      bltzal(scratch, offset);
-      break;
-    case less:
-      slt(scratch, rs, r2);
-      addiu(scratch, scratch, -1);
-      offset = shifted_branch_offset(L, false);
-      bgezal(scratch, offset);
-      break;
-    case less_equal:
-      slt(scratch, r2, rs);
-      addiu(scratch, scratch, -1);
-      offset = shifted_branch_offset(L, false);
-      bltzal(scratch, offset);
-      break;
+      // Signed comparison.
+      case greater:
+        slt(scratch, r2, rs);
+        addiu(scratch, scratch, -1);
+        offset = shifted_branch_offset(L, false);
+        bgezal(scratch, offset);
+        break;
+      case greater_equal:
+        slt(scratch, rs, r2);
+        addiu(scratch, scratch, -1);
+        offset = shifted_branch_offset(L, false);
+        bltzal(scratch, offset);
+        break;
+      case less:
+        slt(scratch, rs, r2);
+        addiu(scratch, scratch, -1);
+        offset = shifted_branch_offset(L, false);
+        bgezal(scratch, offset);
+        break;
+      case less_equal:
+        slt(scratch, r2, rs);
+        addiu(scratch, scratch, -1);
+        offset = shifted_branch_offset(L, false);
+        bltzal(scratch, offset);
+        break;
 
-    // Unsigned comparison.
-    case Ugreater:
-      sltu(scratch, r2, rs);
-      addiu(scratch, scratch, -1);
-      offset = shifted_branch_offset(L, false);
-      bgezal(scratch, offset);
-      break;
-    case Ugreater_equal:
-      sltu(scratch, rs, r2);
-      addiu(scratch, scratch, -1);
-      offset = shifted_branch_offset(L, false);
-      bltzal(scratch, offset);
-      break;
-    case Uless:
-      sltu(scratch, rs, r2);
-      addiu(scratch, scratch, -1);
-      offset = shifted_branch_offset(L, false);
-      bgezal(scratch, offset);
-      break;
-    case Uless_equal:
-      sltu(scratch, r2, rs);
-      addiu(scratch, scratch, -1);
-      offset = shifted_branch_offset(L, false);
-      bltzal(scratch, offset);
-      break;
+      // Unsigned comparison.
+      case Ugreater:
+        sltu(scratch, r2, rs);
+        addiu(scratch, scratch, -1);
+        offset = shifted_branch_offset(L, false);
+        bgezal(scratch, offset);
+        break;
+      case Ugreater_equal:
+        sltu(scratch, rs, r2);
+        addiu(scratch, scratch, -1);
+        offset = shifted_branch_offset(L, false);
+        bltzal(scratch, offset);
+        break;
+      case Uless:
+        sltu(scratch, rs, r2);
+        addiu(scratch, scratch, -1);
+        offset = shifted_branch_offset(L, false);
+        bgezal(scratch, offset);
+        break;
+      case Uless_equal:
+        sltu(scratch, r2, rs);
+        addiu(scratch, scratch, -1);
+        offset = shifted_branch_offset(L, false);
+        bltzal(scratch, offset);
+        break;
 
-    default:
-      UNREACHABLE();
+      default:
+        UNREACHABLE();
+    }
   }
-
   // Check that offset could actually hold on an int16_t.
   ASSERT(is_int16(offset));
 
@@ -2908,12 +2922,12 @@ void MacroAssembler::ThrowUncatchable(Register value) {
 }
 
 
-void MacroAssembler::AllocateInNewSpace(int object_size,
-                                        Register result,
-                                        Register scratch1,
-                                        Register scratch2,
-                                        Label* gc_required,
-                                        AllocationFlags flags) {
+void MacroAssembler::Allocate(int object_size,
+                              Register result,
+                              Register scratch1,
+                              Register scratch2,
+                              Label* gc_required,
+                              AllocationFlags flags) {
   if (!FLAG_inline_new) {
     if (emit_debug_code()) {
       // Trash the registers to simulate an allocation failure.
@@ -2941,20 +2955,21 @@ void MacroAssembler::AllocateInNewSpace(int object_size,
   // Check relative positions of allocation top and limit addresses.
   // ARM adds additional checks to make sure the ldm instruction can be
   // used. On MIPS we don't have ldm so we don't need additional checks either.
-  ExternalReference new_space_allocation_top =
-      ExternalReference::new_space_allocation_top_address(isolate());
-  ExternalReference new_space_allocation_limit =
-      ExternalReference::new_space_allocation_limit_address(isolate());
+  ExternalReference allocation_top =
+      AllocationUtils::GetAllocationTopReference(isolate(), flags);
+  ExternalReference allocation_limit =
+      AllocationUtils::GetAllocationLimitReference(isolate(), flags);
+
   intptr_t top   =
-      reinterpret_cast<intptr_t>(new_space_allocation_top.address());
+      reinterpret_cast<intptr_t>(allocation_top.address());
   intptr_t limit =
-      reinterpret_cast<intptr_t>(new_space_allocation_limit.address());
+      reinterpret_cast<intptr_t>(allocation_limit.address());
   ASSERT((limit - top) == kPointerSize);
 
   // Set up allocation top address and object size registers.
   Register topaddr = scratch1;
   Register obj_size_reg = scratch2;
-  li(topaddr, Operand(new_space_allocation_top));
+  li(topaddr, Operand(allocation_top));
   li(obj_size_reg, Operand(object_size));
 
   // This code stores a temporary value in t9.
@@ -2987,12 +3002,12 @@ void MacroAssembler::AllocateInNewSpace(int object_size,
 }
 
 
-void MacroAssembler::AllocateInNewSpace(Register object_size,
-                                        Register result,
-                                        Register scratch1,
-                                        Register scratch2,
-                                        Label* gc_required,
-                                        AllocationFlags flags) {
+void MacroAssembler::Allocate(Register object_size,
+                              Register result,
+                              Register scratch1,
+                              Register scratch2,
+                              Label* gc_required,
+                              AllocationFlags flags) {
   if (!FLAG_inline_new) {
     if (emit_debug_code()) {
       // Trash the registers to simulate an allocation failure.
@@ -3013,19 +3028,19 @@ void MacroAssembler::AllocateInNewSpace(Register object_size,
   // Check relative positions of allocation top and limit addresses.
   // ARM adds additional checks to make sure the ldm instruction can be
   // used. On MIPS we don't have ldm so we don't need additional checks either.
-  ExternalReference new_space_allocation_top =
-      ExternalReference::new_space_allocation_top_address(isolate());
-  ExternalReference new_space_allocation_limit =
-      ExternalReference::new_space_allocation_limit_address(isolate());
+  ExternalReference allocation_top =
+      AllocationUtils::GetAllocationTopReference(isolate(), flags);
+  ExternalReference allocation_limit =
+      AllocationUtils::GetAllocationLimitReference(isolate(), flags);
   intptr_t top   =
-      reinterpret_cast<intptr_t>(new_space_allocation_top.address());
+      reinterpret_cast<intptr_t>(allocation_top.address());
   intptr_t limit =
-      reinterpret_cast<intptr_t>(new_space_allocation_limit.address());
+      reinterpret_cast<intptr_t>(allocation_limit.address());
   ASSERT((limit - top) == kPointerSize);
 
   // Set up allocation top address and object size registers.
   Register topaddr = scratch1;
-  li(topaddr, Operand(new_space_allocation_top));
+  li(topaddr, Operand(allocation_top));
 
   // This code stores a temporary value in t9.
   if ((flags & RESULT_CONTAINS_TOP) == 0) {
@@ -3104,12 +3119,12 @@ void MacroAssembler::AllocateTwoByteString(Register result,
   And(scratch1, scratch1, Operand(~kObjectAlignmentMask));
 
   // Allocate two-byte string in new space.
-  AllocateInNewSpace(scratch1,
-                     result,
-                     scratch2,
-                     scratch3,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(scratch1,
+           result,
+           scratch2,
+           scratch3,
+           gc_required,
+           TAG_OBJECT);
 
   // Set the map, length and hash field.
   InitializeNewString(result,
@@ -3134,12 +3149,12 @@ void MacroAssembler::AllocateAsciiString(Register result,
   And(scratch1, scratch1, Operand(~kObjectAlignmentMask));
 
   // Allocate ASCII string in new space.
-  AllocateInNewSpace(scratch1,
-                     result,
-                     scratch2,
-                     scratch3,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(scratch1,
+           result,
+           scratch2,
+           scratch3,
+           gc_required,
+           TAG_OBJECT);
 
   // Set the map, length and hash field.
   InitializeNewString(result,
@@ -3155,12 +3170,8 @@ void MacroAssembler::AllocateTwoByteConsString(Register result,
                                                Register scratch1,
                                                Register scratch2,
                                                Label* gc_required) {
-  AllocateInNewSpace(ConsString::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(ConsString::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
   InitializeNewString(result,
                       length,
                       Heap::kConsStringMapRootIndex,
@@ -3174,12 +3185,8 @@ void MacroAssembler::AllocateAsciiConsString(Register result,
                                              Register scratch1,
                                              Register scratch2,
                                              Label* gc_required) {
-  AllocateInNewSpace(ConsString::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(ConsString::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
   InitializeNewString(result,
                       length,
                       Heap::kConsAsciiStringMapRootIndex,
@@ -3193,12 +3200,8 @@ void MacroAssembler::AllocateTwoByteSlicedString(Register result,
                                                  Register scratch1,
                                                  Register scratch2,
                                                  Label* gc_required) {
-  AllocateInNewSpace(SlicedString::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SlicedString::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
 
   InitializeNewString(result,
                       length,
@@ -3213,12 +3216,8 @@ void MacroAssembler::AllocateAsciiSlicedString(Register result,
                                                Register scratch1,
                                                Register scratch2,
                                                Label* gc_required) {
-  AllocateInNewSpace(SlicedString::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SlicedString::kSize, result, scratch1, scratch2, gc_required,
+           TAG_OBJECT);
 
   InitializeNewString(result,
                       length,
@@ -3238,13 +3237,8 @@ void MacroAssembler::AllocateHeapNumber(Register result,
                                         TaggingMode tagging_mode) {
   // Allocate an object in the heap for the heap number and tag it as a heap
   // object.
-  AllocateInNewSpace(HeapNumber::kSize,
-                     result,
-                     scratch1,
-                     scratch2,
-                     need_gc,
-                     tagging_mode == TAG_RESULT ? TAG_OBJECT :
-                                                  NO_ALLOCATION_FLAGS);
+  Allocate(HeapNumber::kSize, result, scratch1, scratch2, need_gc,
+           tagging_mode == TAG_RESULT ? TAG_OBJECT : NO_ALLOCATION_FLAGS);
 
   // Store heap number map in the allocated object.
   AssertRegisterIsRoot(heap_number_map, Heap::kHeapNumberMapRootIndex);
@@ -3484,7 +3478,7 @@ void MacroAssembler::StoreNumberToDoubleElements(Register value_reg,
                                           scratch4,
                                           f2);
   if (destination == FloatingPointHelper::kFPURegisters) {
-    CpuFeatures::Scope scope(FPU);
+    CpuFeatureScope scope(this, FPU);
     sdc1(f0, MemOperand(scratch1, 0));
   } else {
     sw(mantissa_reg, MemOperand(scratch1, 0));
@@ -3577,7 +3571,7 @@ void MacroAssembler::CheckMap(Register obj,
 
 
 void MacroAssembler::GetCFunctionDoubleResult(const DoubleRegister dst) {
-  CpuFeatures::Scope scope(FPU);
+  CpuFeatureScope scope(this, FPU);
   if (IsMipsSoftFloatABI) {
     Move(dst, v0, v1);
   } else {
@@ -3587,7 +3581,7 @@ void MacroAssembler::GetCFunctionDoubleResult(const DoubleRegister dst) {
 
 
 void MacroAssembler::SetCallCDoubleArguments(DoubleRegister dreg) {
-  CpuFeatures::Scope scope(FPU);
+  CpuFeatureScope scope(this, FPU);
   if (!IsMipsSoftFloatABI) {
     Move(f12, dreg);
   } else {
@@ -3598,7 +3592,7 @@ void MacroAssembler::SetCallCDoubleArguments(DoubleRegister dreg) {
 
 void MacroAssembler::SetCallCDoubleArguments(DoubleRegister dreg1,
                                              DoubleRegister dreg2) {
-  CpuFeatures::Scope scope(FPU);
+  CpuFeatureScope scope(this, FPU);
   if (!IsMipsSoftFloatABI) {
     if (dreg2.is(f12)) {
       ASSERT(!dreg1.is(f14));
@@ -3617,7 +3611,7 @@ void MacroAssembler::SetCallCDoubleArguments(DoubleRegister dreg1,
 
 void MacroAssembler::SetCallCDoubleArguments(DoubleRegister dreg,
                                              Register reg) {
-  CpuFeatures::Scope scope(FPU);
+  CpuFeatureScope scope(this, FPU);
   if (!IsMipsSoftFloatABI) {
     Move(f12, dreg);
     Move(a2, reg);
@@ -3862,6 +3856,15 @@ void MacroAssembler::IsObjectJSStringType(Register object,
 }
 
 
+void MacroAssembler::IsObjectNameType(Register object,
+                                      Register scratch,
+                                      Label* fail) {
+  lw(scratch, FieldMemOperand(object, HeapObject::kMapOffset));
+  lbu(scratch, FieldMemOperand(scratch, Map::kInstanceTypeOffset));
+  Branch(fail, hi, scratch, Operand(LAST_NAME_TYPE));
+}
+
+
 // ---------------------------------------------------------------------------
 // Support functions.
 
@@ -3947,7 +3950,8 @@ void MacroAssembler::CallStub(CodeStub* stub,
 
 
 void MacroAssembler::TailCallStub(CodeStub* stub) {
-  ASSERT(allow_stub_calls_ || stub->CompilingCallsToThisStubIsGCSafe());
+  ASSERT(allow_stub_calls_ ||
+         stub->CompilingCallsToThisStubIsGCSafe(isolate()));
   Jump(stub->GetCode(isolate()), RelocInfo::CODE_TARGET);
 }
 
@@ -4065,7 +4069,7 @@ void MacroAssembler::CallApiFunctionAndReturn(ExternalReference function,
 
 bool MacroAssembler::AllowThisStubCall(CodeStub* stub) {
   if (!has_frame_ && stub->SometimesSetsUpAFrame()) return false;
-  return allow_stub_calls_ || stub->CompilingCallsToThisStubIsGCSafe();
+  return allow_stub_calls_ || stub->CompilingCallsToThisStubIsGCSafe(isolate());
 }
 
 
@@ -4557,6 +4561,19 @@ void MacroAssembler::LoadGlobalFunction(int index, Register function) {
 }
 
 
+void MacroAssembler::LoadArrayFunction(Register function) {
+  // Load the global or builtins object from the current context.
+  lw(function,
+     MemOperand(cp, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
+  // Load the global context from the global or builtins object.
+  lw(function,
+     FieldMemOperand(function, GlobalObject::kGlobalContextOffset));
+  // Load the array function from the native context.
+  lw(function,
+     MemOperand(function, Context::SlotOffset(Context::ARRAY_FUNCTION_INDEX)));
+}
+
+
 void MacroAssembler::LoadGlobalFunctionInitialMap(Register function,
                                                   Register map,
                                                   Register scratch) {
@@ -4632,7 +4649,7 @@ void MacroAssembler::EnterExitFrame(bool save_doubles,
 
   const int frame_alignment = MacroAssembler::ActivationFrameAlignment();
   if (save_doubles) {
-    CpuFeatures::Scope scope(FPU);
+    CpuFeatureScope scope(this, FPU);
     // The stack  must be allign to 0 modulo 8 for stores with sdc1.
     ASSERT(kDoubleSize == frame_alignment);
     if (frame_alignment > 0) {
@@ -4670,7 +4687,7 @@ void MacroAssembler::LeaveExitFrame(bool save_doubles,
                                     bool do_return) {
   // Optionally restore all double registers.
   if (save_doubles) {
-    CpuFeatures::Scope scope(FPU);
+    CpuFeatureScope scope(this, FPU);
     // Remember: we only need to restore every 2nd double FPU value.
     lw(t8, MemOperand(fp, ExitFrameConstants::kSPOffset));
     for (int i = 0; i < FPURegister::kMaxNumRegisters; i+=2) {
@@ -4875,6 +4892,20 @@ void MacroAssembler::AssertString(Register object) {
     lw(object, FieldMemOperand(object, HeapObject::kMapOffset));
     lbu(object, FieldMemOperand(object, Map::kInstanceTypeOffset));
     Check(lo, "Operand is not a string", object, Operand(FIRST_NONSTRING_TYPE));
+    pop(object);
+  }
+}
+
+
+void MacroAssembler::AssertName(Register object) {
+  if (emit_debug_code()) {
+    STATIC_ASSERT(kSmiTag == 0);
+    And(t0, object, Operand(kSmiTagMask));
+    Check(ne, "Operand is a smi and not a name", t0, Operand(zero_reg));
+    push(object);
+    lw(object, FieldMemOperand(object, HeapObject::kMapOffset));
+    lbu(object, FieldMemOperand(object, Map::kInstanceTypeOffset));
+    Check(le, "Operand is not a name", object, Operand(LAST_NAME_TYPE));
     pop(object);
   }
 }
@@ -5483,7 +5514,6 @@ bool AreAliased(Register r1, Register r2, Register r3, Register r4) {
 
 CodePatcher::CodePatcher(byte* address, int instructions)
     : address_(address),
-      instructions_(instructions),
       size_(instructions * Assembler::kInstrSize),
       masm_(NULL, address, size_ + Assembler::kGap) {
   // Create a new macro assembler pointing to the address of the code to patch.

@@ -38,11 +38,6 @@
 #ifndef V8_H_
 #define V8_H_
 
-// TODO(svenpanne) Remove me when the Chrome bindings are adapted.
-#define V8_DISABLE_DEPRECATIONS 1
-// TODO(dcarney): Remove once Latin-1 transitions in WebKit has stuck.
-#define V8_ONE_BYTE_STRINGS_ENABLED 1
-
 #include "v8stdint.h"
 
 #ifdef _WIN32
@@ -102,45 +97,47 @@
  */
 namespace v8 {
 
+class AccessorInfo;
+class AccessorSignature;
+class Array;
+class Boolean;
+class BooleanObject;
 class Context;
-class String;
-class StringObject;
-class Value;
-class Utils;
+class Data;
+class Date;
+class DeclaredAccessorDescriptor;
+class External;
+class Function;
+class FunctionTemplate;
+class ImplementationUtilities;
+class Int32;
+class Integer;
+class Isolate;
 class Number;
 class NumberObject;
 class Object;
-class Array;
-class Int32;
-class Uint32;
-class External;
+class ObjectOperationDescriptor;
+class ObjectTemplate;
 class Primitive;
-class Boolean;
-class BooleanObject;
-class Integer;
-class Function;
-class Date;
-class ImplementationUtilities;
+class RawOperationDescriptor;
 class Signature;
-class AccessorSignature;
+class StackFrame;
+class StackTrace;
+class String;
+class StringObject;
+class Uint32;
+class Utils;
+class Value;
 template <class T> class Handle;
 template <class T> class Local;
 template <class T> class Persistent;
-class FunctionTemplate;
-class ObjectTemplate;
-class Data;
-class AccessorInfo;
-class StackTrace;
-class StackFrame;
-class Isolate;
 
 namespace internal {
-
 class Arguments;
-class Object;
 class Heap;
 class HeapObject;
 class Isolate;
+class Object;
 }
 
 
@@ -516,7 +513,10 @@ template <class T> class Persistent : public Handle<T> {
  */
 class V8EXPORT HandleScope {
  public:
+  // TODO(svenpanne) Deprecate me when Chrome is fixed!
   HandleScope();
+
+  HandleScope(Isolate* isolate);
 
   ~HandleScope();
 
@@ -561,6 +561,7 @@ class V8EXPORT HandleScope {
     }
   };
 
+  void Initialize(Isolate* isolate);
   void Leave();
 
   internal::Isolate* isolate_;
@@ -1608,6 +1609,12 @@ class V8EXPORT Object : public Value {
                    AccessControl settings = DEFAULT,
                    PropertyAttribute attribute = None);
 
+  // This function is not yet stable and should not be used at this time.
+  bool SetAccessor(Handle<String> name,
+                   Handle<DeclaredAccessorDescriptor> descriptor,
+                   AccessControl settings = DEFAULT,
+                   PropertyAttribute attribute = None);
+
   /**
    * Returns an array containing the names of the enumerable properties
    * of this object, including properties from prototype objects.  The
@@ -2379,13 +2386,6 @@ class V8EXPORT FunctionTemplate : public Template {
 
  private:
   FunctionTemplate();
-  void AddInstancePropertyAccessor(Handle<String> name,
-                                   AccessorGetter getter,
-                                   AccessorSetter setter,
-                                   Handle<Value> data,
-                                   AccessControl settings,
-                                   PropertyAttribute attributes,
-                                   Handle<AccessorSignature> signature);
   void SetNamedInstancePropertyHandler(NamedPropertyGetter getter,
                                        NamedPropertySetter setter,
                                        NamedPropertyQuery query,
@@ -2453,6 +2453,14 @@ class V8EXPORT ObjectTemplate : public Template {
                    AccessorGetter getter,
                    AccessorSetter setter = 0,
                    Handle<Value> data = Handle<Value>(),
+                   AccessControl settings = DEFAULT,
+                   PropertyAttribute attribute = None,
+                   Handle<AccessorSignature> signature =
+                       Handle<AccessorSignature>());
+
+  // This function is not yet stable and should not be used at this time.
+  bool SetAccessor(Handle<String> name,
+                   Handle<DeclaredAccessorDescriptor> descriptor,
                    AccessControl settings = DEFAULT,
                    PropertyAttribute attribute = None,
                    Handle<AccessorSignature> signature =
@@ -2584,6 +2592,61 @@ class V8EXPORT AccessorSignature : public Data {
                                           Handle<FunctionTemplate>());
  private:
   AccessorSignature();
+};
+
+
+class V8EXPORT DeclaredAccessorDescriptor : public Data {
+ private:
+  DeclaredAccessorDescriptor();
+};
+
+
+class V8EXPORT ObjectOperationDescriptor : public Data {
+ public:
+  // This function is not yet stable and should not be used at this time.
+  static Local<RawOperationDescriptor> NewInternalFieldDereference(
+      Isolate* isolate,
+      int internal_field);
+ private:
+  ObjectOperationDescriptor();
+};
+
+
+enum DeclaredAccessorDescriptorDataType {
+    kDescriptorBoolType,
+    kDescriptorInt8Type, kDescriptorUint8Type,
+    kDescriptorInt16Type, kDescriptorUint16Type,
+    kDescriptorInt32Type, kDescriptorUint32Type,
+    kDescriptorFloatType, kDescriptorDoubleType
+};
+
+
+class V8EXPORT RawOperationDescriptor : public Data {
+ public:
+  Local<DeclaredAccessorDescriptor> NewHandleDereference(Isolate* isolate);
+  Local<RawOperationDescriptor> NewRawDereference(Isolate* isolate);
+  Local<RawOperationDescriptor> NewRawShift(Isolate* isolate,
+                                            int16_t byte_offset);
+  Local<DeclaredAccessorDescriptor> NewPointerCompare(Isolate* isolate,
+                                                      void* compare_value);
+  Local<DeclaredAccessorDescriptor> NewPrimitiveValue(
+      Isolate* isolate,
+      DeclaredAccessorDescriptorDataType data_type,
+      uint8_t bool_offset = 0);
+  Local<DeclaredAccessorDescriptor> NewBitmaskCompare8(Isolate* isolate,
+                                                       uint8_t bitmask,
+                                                       uint8_t compare_value);
+  Local<DeclaredAccessorDescriptor> NewBitmaskCompare16(
+      Isolate* isolate,
+      uint16_t bitmask,
+      uint16_t compare_value);
+  Local<DeclaredAccessorDescriptor> NewBitmaskCompare32(
+      Isolate* isolate,
+      uint32_t bitmask,
+      uint32_t compare_value);
+
+ private:
+  RawOperationDescriptor();
 };
 
 
@@ -2943,6 +3006,21 @@ class V8EXPORT Isolate {
    * Get statistics about the heap memory usage.
    */
   void GetHeapStatistics(HeapStatistics* heap_statistics);
+
+  /**
+   * Adjusts the amount of registered external memory. Used to give V8 an
+   * indication of the amount of externally allocated memory that is kept alive
+   * by JavaScript objects. V8 uses this to decide when to perform global
+   * garbage collections. Registering externally allocated memory will trigger
+   * global garbage collections more often than it would otherwise in an attempt
+   * to garbage collect the JavaScript objects that keep the externally
+   * allocated memory alive.
+   *
+   * \param change_in_bytes the change in externally allocated memory that is
+   *   kept alive by JavaScript objects.
+   * \returns the adjusted value.
+   */
+  intptr_t AdjustAmountOfExternalAllocatedMemory(intptr_t change_in_bytes);
 
  private:
   Isolate();
@@ -3424,20 +3502,8 @@ class V8EXPORT V8 {
   static void SetJitCodeEventHandler(JitCodeEventOptions options,
                                      JitCodeEventHandler event_handler);
 
-  /**
-   * Adjusts the amount of registered external memory.  Used to give
-   * V8 an indication of the amount of externally allocated memory
-   * that is kept alive by JavaScript objects.  V8 uses this to decide
-   * when to perform global garbage collections.  Registering
-   * externally allocated memory will trigger global garbage
-   * collections more often than otherwise in an attempt to garbage
-   * collect the JavaScript objects keeping the externally allocated
-   * memory alive.
-   *
-   * \param change_in_bytes the change in externally allocated memory
-   *   that is kept alive by JavaScript objects.
-   * \returns the adjusted value.
-   */
+  // TODO(svenpanne) Really deprecate me when Chrome is fixed.
+  /** Deprecated. Use Isolate::AdjustAmountOfExternalAllocatedMemory instead. */
   static intptr_t AdjustAmountOfExternalAllocatedMemory(
       intptr_t change_in_bytes);
 
@@ -4208,7 +4274,7 @@ class Internals {
   static const int kJSObjectHeaderSize = 3 * kApiPointerSize;
   static const int kFixedArrayHeaderSize = 2 * kApiPointerSize;
   static const int kContextHeaderSize = 2 * kApiPointerSize;
-  static const int kContextEmbedderDataIndex = 54;
+  static const int kContextEmbedderDataIndex = 55;
   static const int kFullStringRepresentationMask = 0x07;
   static const int kStringEncodingMask = 0x4;
   static const int kExternalTwoByteRepresentationTag = 0x02;

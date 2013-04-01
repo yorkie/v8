@@ -67,6 +67,7 @@ MarkCompactCollector::MarkCompactCollector() :  // NOLINT
       compacting_(false),
       was_marked_incrementally_(false),
       sweeping_pending_(false),
+      sequential_sweeping_(false),
       tracer_(NULL),
       migration_slots_buffer_(NULL),
       heap_(NULL),
@@ -544,22 +545,21 @@ void MarkCompactCollector::ClearMarkbits() {
 void MarkCompactCollector::StartSweeperThreads() {
   sweeping_pending_ = true;
   for (int i = 0; i < FLAG_sweeper_threads; i++) {
-    heap()->isolate()->sweeper_threads()[i]->StartSweeping();
+    isolate()->sweeper_threads()[i]->StartSweeping();
   }
 }
 
 
 void MarkCompactCollector::WaitUntilSweepingCompleted() {
-  if (sweeping_pending_) {
-    for (int i = 0; i < FLAG_sweeper_threads; i++) {
-      heap()->isolate()->sweeper_threads()[i]->WaitForSweeperThread();
-    }
-    sweeping_pending_ = false;
-    StealMemoryFromSweeperThreads(heap()->paged_space(OLD_DATA_SPACE));
-    StealMemoryFromSweeperThreads(heap()->paged_space(OLD_POINTER_SPACE));
-    heap()->paged_space(OLD_DATA_SPACE)->ResetUnsweptFreeBytes();
-    heap()->paged_space(OLD_POINTER_SPACE)->ResetUnsweptFreeBytes();
+  ASSERT(sweeping_pending_ == true);
+  for (int i = 0; i < FLAG_sweeper_threads; i++) {
+    isolate()->sweeper_threads()[i]->WaitForSweeperThread();
   }
+  sweeping_pending_ = false;
+  StealMemoryFromSweeperThreads(heap()->paged_space(OLD_DATA_SPACE));
+  StealMemoryFromSweeperThreads(heap()->paged_space(OLD_POINTER_SPACE));
+  heap()->paged_space(OLD_DATA_SPACE)->ResetUnsweptFreeBytes();
+  heap()->paged_space(OLD_POINTER_SPACE)->ResetUnsweptFreeBytes();
 }
 
 
@@ -567,7 +567,7 @@ intptr_t MarkCompactCollector::
              StealMemoryFromSweeperThreads(PagedSpace* space) {
   intptr_t freed_bytes = 0;
   for (int i = 0; i < FLAG_sweeper_threads; i++) {
-    freed_bytes += heap()->isolate()->sweeper_threads()[i]->StealMemory(space);
+    freed_bytes += isolate()->sweeper_threads()[i]->StealMemory(space);
   }
   space->AddToAccountingStats(freed_bytes);
   space->DecrementUnsweptFreeBytes(freed_bytes);
@@ -576,7 +576,7 @@ intptr_t MarkCompactCollector::
 
 
 bool MarkCompactCollector::AreSweeperThreadsActivated() {
-  return heap()->isolate()->sweeper_threads() != NULL;
+  return isolate()->sweeper_threads() != NULL;
 }
 
 
@@ -585,23 +585,16 @@ bool MarkCompactCollector::IsConcurrentSweepingInProgress() {
 }
 
 
-void MarkCompactCollector::FinalizeSweeping() {
-  ASSERT(sweeping_pending_ == false);
-  ReleaseEvacuationCandidates();
-  heap()->FreeQueuedChunks();
-}
-
-
 void MarkCompactCollector::MarkInParallel() {
   for (int i = 0; i < FLAG_marking_threads; i++) {
-    heap()->isolate()->marking_threads()[i]->StartMarking();
+    isolate()->marking_threads()[i]->StartMarking();
   }
 }
 
 
 void MarkCompactCollector::WaitUntilMarkingCompleted() {
   for (int i = 0; i < FLAG_marking_threads; i++) {
-    heap()->isolate()->marking_threads()[i]->WaitForMarkingThread();
+    isolate()->marking_threads()[i]->WaitForMarkingThread();
   }
 }
 
@@ -908,10 +901,9 @@ void MarkCompactCollector::Prepare(GCTracer* tracer) {
 
   ASSERT(!FLAG_never_compact || !FLAG_always_compact);
 
-  if (AreSweeperThreadsActivated() && FLAG_concurrent_sweeping) {
+  if (IsConcurrentSweepingInProgress()) {
     // Instead of waiting we could also abort the sweeper threads here.
     WaitUntilSweepingCompleted();
-    FinalizeSweeping();
   }
 
   // Clear marking bits if incremental marking is aborted.
@@ -960,10 +952,10 @@ void MarkCompactCollector::Finish() {
   // force lazy re-initialization of it. This must be done after the
   // GC, because it relies on the new address of certain old space
   // objects (empty string, illegal builtin).
-  heap()->isolate()->stub_cache()->Clear();
+  isolate()->stub_cache()->Clear();
 
   DeoptimizeMarkedCodeFilter filter;
-  Deoptimizer::DeoptimizeAllFunctionsWith(&filter);
+  Deoptimizer::DeoptimizeAllFunctionsWith(isolate(), &filter);
 }
 
 
@@ -1059,16 +1051,6 @@ void CodeFlusher::ProcessSharedFunctionInfoCandidates() {
   }
 
   shared_function_info_candidates_head_ = NULL;
-}
-
-
-bool CodeFlusher::ContainsCandidate(SharedFunctionInfo* shared_info) {
-  SharedFunctionInfo* candidate = shared_function_info_candidates_head_;
-  while (candidate != NULL) {
-    if (candidate == shared_info) return true;
-    candidate = GetNextCandidate(candidate);
-  }
-  return false;
 }
 
 
@@ -1950,7 +1932,7 @@ void MarkCompactCollector::MarkRoots(RootMarkingVisitor* visitor) {
 
 void MarkCompactCollector::MarkImplicitRefGroups() {
   List<ImplicitRefGroup*>* ref_groups =
-      heap()->isolate()->global_handles()->implicit_ref_groups();
+      isolate()->global_handles()->implicit_ref_groups();
 
   int last = 0;
   for (int i = 0; i < ref_groups->length(); i++) {
@@ -2070,7 +2052,7 @@ void MarkCompactCollector::ProcessExternalMarking(RootMarkingVisitor* visitor) {
   bool work_to_do = true;
   ASSERT(marking_deque_.IsEmpty());
   while (work_to_do) {
-    heap()->isolate()->global_handles()->IterateObjectGroups(
+    isolate()->global_handles()->IterateObjectGroups(
         visitor, &IsUnmarkedHeapObjectWithHeap);
     MarkImplicitRefGroups();
     work_to_do = !marking_deque_.IsEmpty();
@@ -2084,7 +2066,7 @@ void MarkCompactCollector::MarkLiveObjects() {
   // The recursive GC marker detects when it is nearing stack overflow,
   // and switches to a different marking system.  JS interrupts interfere
   // with the C stack limit check.
-  PostponeInterruptsScope postpone(heap()->isolate());
+  PostponeInterruptsScope postpone(isolate());
 
   bool incremental_marking_overflowed = false;
   IncrementalMarking* incremental_marking = heap_->incremental_marking();
@@ -2538,7 +2520,7 @@ void MarkCompactCollector::MigrateObject(Address dst,
       }
     }
   } else if (dest == CODE_SPACE) {
-    PROFILE(heap()->isolate(), CodeMoveEvent(src, dst));
+    PROFILE(isolate(), CodeMoveEvent(src, dst));
     heap()->MoveBlock(dst, src, size);
     SlotsBuffer::AddTo(&slots_buffer_allocator_,
                        &migration_slots_buffer_,
@@ -2859,6 +2841,7 @@ void MarkCompactCollector::EvacuatePages() {
           slots_buffer_allocator_.DeallocateChain(page->slots_buffer_address());
           page->ClearEvacuationCandidate();
           page->SetFlag(Page::RESCAN_ON_EVACUATION);
+          page->InsertAfter(static_cast<PagedSpace*>(page->owner())->anchor());
         }
         return;
       }
@@ -3319,6 +3302,18 @@ void MarkCompactCollector::EvacuateNewSpaceAndCandidates() {
 }
 
 
+void MarkCompactCollector::UnlinkEvacuationCandidates() {
+  int npages = evacuation_candidates_.length();
+  for (int i = 0; i < npages; i++) {
+    Page* p = evacuation_candidates_[i];
+    if (!p->IsEvacuationCandidate()) continue;
+    p->Unlink();
+    p->ClearSweptPrecisely();
+    p->ClearSweptConservatively();
+  }
+}
+
+
 void MarkCompactCollector::ReleaseEvacuationCandidates() {
   int npages = evacuation_candidates_.length();
   for (int i = 0; i < npages; i++) {
@@ -3329,10 +3324,11 @@ void MarkCompactCollector::ReleaseEvacuationCandidates() {
     p->set_scan_on_scavenge(false);
     slots_buffer_allocator_.DeallocateChain(p->slots_buffer_address());
     p->ResetLiveBytes();
-    space->ReleasePage(p);
+    space->ReleasePage(p, false);
   }
   evacuation_candidates_.Rewind(0);
   compacting_ = false;
+  heap()->FreeQueuedChunks();
 }
 
 
@@ -3771,26 +3767,24 @@ void MarkCompactCollector::SweepSpace(PagedSpace* space, SweeperType sweeper) {
 
   PageIterator it(space);
 
-  intptr_t freed_bytes = 0;
   int pages_swept = 0;
   bool lazy_sweeping_active = false;
   bool unused_page_present = false;
+  bool parallel_sweeping_active = false;
 
   while (it.has_next()) {
     Page* p = it.next();
 
     ASSERT(p->parallel_sweeping() == 0);
+    ASSERT(!p->IsEvacuationCandidate());
+
     // Clear sweeping flags indicating that marking bits are still intact.
     p->ClearSweptPrecisely();
     p->ClearSweptConservatively();
 
-    if (p->IsEvacuationCandidate()) {
-      ASSERT(evacuation_candidates_.length() > 0);
-      continue;
-    }
-
     if (p->IsFlagSet(Page::RESCAN_ON_EVACUATION)) {
       // Will be processed in EvacuateNewSpaceAndCandidates.
+      ASSERT(evacuation_candidates_.length() > 0);
       continue;
     }
 
@@ -3804,19 +3798,10 @@ void MarkCompactCollector::SweepSpace(PagedSpace* space, SweeperType sweeper) {
         // Adjust unswept free bytes because releasing a page expects said
         // counter to be accurate for unswept pages.
         space->IncreaseUnsweptFreeBytes(p);
-        space->ReleasePage(p);
+        space->ReleasePage(p, true);
         continue;
       }
       unused_page_present = true;
-    }
-
-    if (lazy_sweeping_active) {
-      if (FLAG_gc_verbose) {
-        PrintF("Sweeping 0x%" V8PRIxPTR " lazily postponed.\n",
-               reinterpret_cast<intptr_t>(p));
-      }
-      space->IncreaseUnsweptFreeBytes(p);
-      continue;
     }
 
     switch (sweeper) {
@@ -3830,24 +3815,42 @@ void MarkCompactCollector::SweepSpace(PagedSpace* space, SweeperType sweeper) {
         break;
       }
       case LAZY_CONSERVATIVE: {
-        if (FLAG_gc_verbose) {
-          PrintF("Sweeping 0x%" V8PRIxPTR " conservatively as needed.\n",
-                 reinterpret_cast<intptr_t>(p));
+        if (lazy_sweeping_active) {
+          if (FLAG_gc_verbose) {
+            PrintF("Sweeping 0x%" V8PRIxPTR " lazily postponed.\n",
+                   reinterpret_cast<intptr_t>(p));
+          }
+          space->IncreaseUnsweptFreeBytes(p);
+        } else {
+          if (FLAG_gc_verbose) {
+            PrintF("Sweeping 0x%" V8PRIxPTR " conservatively.\n",
+                   reinterpret_cast<intptr_t>(p));
+          }
+          SweepConservatively<SWEEP_SEQUENTIALLY>(space, NULL, p);
+          pages_swept++;
+          space->SetPagesToSweep(p->next_page());
+          lazy_sweeping_active = true;
         }
-        freed_bytes += SweepConservatively<SWEEP_SEQUENTIALLY>(space, NULL, p);
-        pages_swept++;
-        space->SetPagesToSweep(p->next_page());
-        lazy_sweeping_active = true;
         break;
       }
       case CONCURRENT_CONSERVATIVE:
       case PARALLEL_CONSERVATIVE: {
-        if (FLAG_gc_verbose) {
-          PrintF("Sweeping 0x%" V8PRIxPTR " conservatively in parallel.\n",
-                 reinterpret_cast<intptr_t>(p));
+        if (!parallel_sweeping_active) {
+          if (FLAG_gc_verbose) {
+            PrintF("Sweeping 0x%" V8PRIxPTR " conservatively.\n",
+                   reinterpret_cast<intptr_t>(p));
+          }
+          SweepConservatively<SWEEP_SEQUENTIALLY>(space, NULL, p);
+          pages_swept++;
+          parallel_sweeping_active = true;
+        } else {
+          if (FLAG_gc_verbose) {
+            PrintF("Sweeping 0x%" V8PRIxPTR " conservatively in parallel.\n",
+                   reinterpret_cast<intptr_t>(p));
+          }
+          p->set_parallel_sweeping(1);
+          space->IncreaseUnsweptFreeBytes(p);
         }
-        p->set_parallel_sweeping(1);
-        space->IncreaseUnsweptFreeBytes(p);
         break;
       }
       case PRECISE: {
@@ -3891,12 +3894,17 @@ void MarkCompactCollector::SweepSpaces() {
   if (FLAG_concurrent_sweeping) how_to_sweep = CONCURRENT_CONSERVATIVE;
   if (FLAG_expose_gc) how_to_sweep = CONSERVATIVE;
   if (sweep_precisely_) how_to_sweep = PRECISE;
+
+  // Unlink evacuation candidates before sweeper threads access the list of
+  // pages to avoid race condition.
+  UnlinkEvacuationCandidates();
+
   // Noncompacting collections simply sweep the spaces to clear the mark
   // bits and free the nonlive blocks (for old and map spaces).  We sweep
   // the map space last because freeing non-live maps overwrites them and
   // the other spaces rely on possibly non-live maps to get the sizes for
   // non-live objects.
-
+  SequentialSweepingScope scope(this);
   SweepSpace(heap()->old_pointer_space(), how_to_sweep);
   SweepSpace(heap()->old_data_space(), how_to_sweep);
 
@@ -3925,23 +3933,22 @@ void MarkCompactCollector::SweepSpaces() {
   // Deallocate unmarked objects and clear marked bits for marked objects.
   heap_->lo_space()->FreeUnmarkedObjects();
 
-  if (how_to_sweep != CONCURRENT_CONSERVATIVE) {
-    FinalizeSweeping();
-  }
+  // Deallocate evacuated candidate pages.
+  ReleaseEvacuationCandidates();
 }
 
 
 void MarkCompactCollector::EnableCodeFlushing(bool enable) {
 #ifdef ENABLE_DEBUGGER_SUPPORT
-  if (heap()->isolate()->debug()->IsLoaded() ||
-      heap()->isolate()->debug()->has_break_points()) {
+  if (isolate()->debug()->IsLoaded() ||
+      isolate()->debug()->has_break_points()) {
     enable = false;
   }
 #endif
 
   if (enable) {
     if (code_flusher_ != NULL) return;
-    code_flusher_ = new CodeFlusher(heap()->isolate());
+    code_flusher_ = new CodeFlusher(isolate());
   } else {
     if (code_flusher_ == NULL) return;
     code_flusher_->EvictAllCandidates();
@@ -3964,6 +3971,11 @@ void MarkCompactCollector::ReportDeleteIfNeeded(HeapObject* obj,
   if (obj->IsCode()) {
     PROFILE(isolate, CodeDeleteEvent(obj->address()));
   }
+}
+
+
+Isolate* MarkCompactCollector::isolate() const {
+  return heap_->isolate();
 }
 
 
@@ -4048,7 +4060,7 @@ void MarkCompactCollector::RecordCodeEntrySlot(Address slot, Code* target) {
 void MarkCompactCollector::RecordCodeTargetPatch(Address pc, Code* target) {
   ASSERT(heap()->gc_state() == Heap::MARK_COMPACT);
   if (is_compacting()) {
-    Code* host = heap()->isolate()->inner_pointer_to_code_cache()->
+    Code* host = isolate()->inner_pointer_to_code_cache()->
         GcSafeFindCodeForInnerPointer(pc);
     MarkBit mark_bit = Marking::MarkBitFrom(host);
     if (Marking::IsBlack(mark_bit)) {

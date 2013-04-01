@@ -33,6 +33,7 @@
 #include "codegen.h"
 #include "compilation-cache.h"
 #include "debug.h"
+#include "deoptimizer.h"
 #include "full-codegen.h"
 #include "gdb-jit.h"
 #include "hydrogen.h"
@@ -234,9 +235,9 @@ void OptimizingCompiler::RecordOptimizationStats() {
            compilation_time);
   }
   if (FLAG_hydrogen_stats) {
-    HStatistics::Instance()->IncrementSubtotals(time_taken_to_create_graph_,
-                                                time_taken_to_optimize_,
-                                                time_taken_to_codegen_);
+    isolate()->GetHStatistics()->IncrementSubtotals(time_taken_to_create_graph_,
+                                                    time_taken_to_optimize_,
+                                                    time_taken_to_codegen_);
   }
 }
 
@@ -277,7 +278,7 @@ OptimizingCompiler::Status OptimizingCompiler::CreateGraph() {
   // Fall back to using the full code generator if it's not possible
   // to use the Hydrogen-based optimizing compiler. We already have
   // generated code for this from the shared function object.
-  if (AlwaysFullCompiler(info()->isolate())) {
+  if (AlwaysFullCompiler(isolate())) {
     info()->SetCode(code);
     return SetLastStatus(BAILED_OUT);
   }
@@ -330,7 +331,7 @@ OptimizingCompiler::Status OptimizingCompiler::CreateGraph() {
   // performance of the hydrogen-based compiler.
   bool should_recompile = !info()->shared_info()->has_deoptimization_support();
   if (should_recompile || FLAG_hydrogen_stats) {
-    HPhase phase(HPhase::kFullCodeGen);
+    HPhase phase(HPhase::kFullCodeGen, isolate());
     CompilationInfoWithZone unoptimized(info()->shared_info());
     // Note that we use the same AST that we will use for generating the
     // optimized code.
@@ -360,18 +361,18 @@ OptimizingCompiler::Status OptimizingCompiler::CreateGraph() {
   if (FLAG_trace_hydrogen) {
     PrintF("-----------------------------------------------------------\n");
     PrintF("Compiling method %s using hydrogen\n", *name->ToCString());
-    HTracer::Instance()->TraceCompilation(info());
+    isolate()->GetHTracer()->TraceCompilation(info());
   }
   Handle<Context> native_context(
       info()->closure()->context()->native_context());
   oracle_ = new(info()->zone()) TypeFeedbackOracle(
-      code, native_context, info()->isolate(), info()->zone());
+      code, native_context, isolate(), info()->zone());
   graph_builder_ = new(info()->zone()) HOptimizedGraphBuilder(info(), oracle_);
 
   Timer t(this, &time_taken_to_create_graph_);
   graph_ = graph_builder_->CreateGraph();
 
-  if (info()->isolate()->has_pending_exception()) {
+  if (isolate()->has_pending_exception()) {
     info()->SetCode(Handle<Code>::null());
     return SetLastStatus(FAILED);
   }
@@ -395,7 +396,7 @@ OptimizingCompiler::Status OptimizingCompiler::CreateGraph() {
 OptimizingCompiler::Status OptimizingCompiler::OptimizeGraph() {
   AssertNoAllocation no_gc;
   NoHandleAllocation no_handles(isolate());
-  NoHandleDereference no_deref(isolate());
+  HandleDereferenceGuard no_deref(isolate(), HandleDereferenceGuard::DISALLOW);
 
   ASSERT(last_status() == SUCCEEDED);
   Timer t(this, &time_taken_to_optimize_);
@@ -681,6 +682,7 @@ Handle<SharedFunctionInfo> Compiler::CompileEval(Handle<String> source,
                                                  Handle<Context> context,
                                                  bool is_global,
                                                  LanguageMode language_mode,
+                                                 ParseRestriction restriction,
                                                  int scope_position) {
   Isolate* isolate = source->GetIsolate();
   int source_length = source->length();
@@ -707,6 +709,7 @@ Handle<SharedFunctionInfo> Compiler::CompileEval(Handle<String> source,
     info.MarkAsEval();
     if (is_global) info.MarkAsGlobal();
     info.SetLanguageMode(language_mode);
+    info.SetParseRestriction(restriction);
     info.SetContext(context);
     result = MakeFunctionInfo(&info);
     if (!result.is_null()) {
@@ -898,7 +901,6 @@ bool Compiler::CompileLazy(CompilationInfo* info) {
 
 
 void Compiler::RecompileParallel(Handle<JSFunction> closure) {
-  if (closure->IsInRecompileQueue()) return;
   ASSERT(closure->IsMarkedForParallelRecompilation());
 
   Isolate* isolate = closure->GetIsolate();
@@ -926,8 +928,7 @@ void Compiler::RecompileParallel(Handle<JSFunction> closure) {
   {
     CompilationHandleScope handle_scope(*info);
 
-    if (!FLAG_manual_parallel_recompilation &&
-        InstallCodeFromOptimizedCodeMap(*info)) {
+    if (InstallCodeFromOptimizedCodeMap(*info)) {
       return;
     }
 
@@ -942,11 +943,12 @@ void Compiler::RecompileParallel(Handle<JSFunction> closure) {
             new(info->zone()) OptimizingCompiler(*info);
         OptimizingCompiler::Status status = compiler->CreateGraph();
         if (status == OptimizingCompiler::SUCCEEDED) {
-          isolate->optimizing_compiler_thread()->QueueForOptimization(compiler);
-          shared->code()->set_profiler_ticks(0);
-          closure->ReplaceCode(isolate->builtins()->builtin(
-              Builtins::kInRecompileQueue));
           info.Detach();
+          shared->code()->set_profiler_ticks(0);
+          // Do a scavenge to put off the next scavenge as far as possible.
+          // This may ease the issue that GVN blocks the next scavenge.
+          isolate->heap()->CollectGarbage(NEW_SPACE, "parallel recompile");
+          isolate->optimizing_compiler_thread()->QueueForOptimization(compiler);
         } else if (status == OptimizingCompiler::BAILED_OUT) {
           isolate->clear_pending_exception();
           InstallFullCode(*info);
@@ -955,14 +957,40 @@ void Compiler::RecompileParallel(Handle<JSFunction> closure) {
     }
   }
 
-  if (isolate->has_pending_exception()) {
-    isolate->clear_pending_exception();
+  if (shared->code()->stack_check_patched_for_osr()) {
+    // At this point we either put the function on recompilation queue or
+    // aborted optimization.  In either case we want to continue executing
+    // the unoptimized code without running into OSR.  If the unoptimized
+    // code has been patched for OSR, unpatch it.
+    InterruptStub interrupt_stub;
+    Handle<Code> check_code = interrupt_stub.GetCode(isolate);
+    Handle<Code> replacement_code =
+        isolate->builtins()->OnStackReplacement();
+    Deoptimizer::RevertStackCheckCode(shared->code(),
+                                      *check_code,
+                                      *replacement_code);
   }
+
+  if (isolate->has_pending_exception()) isolate->clear_pending_exception();
 }
 
 
 void Compiler::InstallOptimizedCode(OptimizingCompiler* optimizing_compiler) {
   SmartPointer<CompilationInfo> info(optimizing_compiler->info());
+  // The function may have already been optimized by OSR.  Simply continue.
+  // Except when OSR already disabled optimization for some reason.
+  if (info->shared_info()->optimization_disabled()) {
+    info->SetCode(Handle<Code>(info->shared_info()->code()));
+    InstallFullCode(*info);
+    if (FLAG_trace_parallel_recompilation) {
+      PrintF("  ** aborting optimization for ");
+      info->closure()->PrintName();
+      PrintF(" as it has been disabled.\n");
+    }
+    ASSERT(!info->closure()->IsMarkedForInstallingRecompiledCode());
+    return;
+  }
+
   Isolate* isolate = info->isolate();
   VMState state(isolate, PARALLEL_COMPILER);
   Logger::TimerEventScope timer(
@@ -989,10 +1017,19 @@ void Compiler::InstallOptimizedCode(OptimizingCompiler* optimizing_compiler) {
             info->closure()->context()->native_context()) == -1) {
       InsertCodeIntoOptimizedCodeMap(*info);
     }
+    if (FLAG_trace_parallel_recompilation) {
+      PrintF("  ** Optimized code for ");
+      info->closure()->PrintName();
+      PrintF(" installed.\n");
+    }
   } else {
     info->SetCode(Handle<Code>(info->shared_info()->code()));
     InstallFullCode(*info);
   }
+  // Optimized code is finally replacing unoptimized code.  Reset the latter's
+  // profiler ticks to prevent too soon re-opt after a deopt.
+  info->shared_info()->code()->set_profiler_ticks(0);
+  ASSERT(!info->closure()->IsMarkedForInstallingRecompiledCode());
 }
 
 

@@ -344,9 +344,6 @@ void RegExpMacroAssemblerIA32::CheckNotBackReferenceIgnoreCase(
     __ or_(eax, 0x20);  // Convert match character to lower-case.
     __ lea(ecx, Operand(eax, -'a'));
     __ cmp(ecx, static_cast<int32_t>('z' - 'a'));  // Is eax a lowercase letter?
-#ifndef ENABLE_LATIN_1
-    __ j(above, &fail);  // Weren't letters anyway.
-#else
     Label convert_capture;
     __ j(below_equal, &convert_capture);  // In range 'a'-'z'.
     // Latin-1: Check for values in range [224,254] but not 247.
@@ -356,7 +353,6 @@ void RegExpMacroAssemblerIA32::CheckNotBackReferenceIgnoreCase(
     __ cmp(ecx, Immediate(247 - 224));  // Check for 247.
     __ j(equal, &fail);
     __ bind(&convert_capture);
-#endif
     // Also convert capture character.
     __ movzx_b(ecx, Operand(edx, 0));
     __ or_(ecx, 0x20);
@@ -599,29 +595,23 @@ bool RegExpMacroAssemblerIA32::CheckSpecialCharacterClass(uc16 type,
   case 's':
     // Match space-characters
     if (mode_ == ASCII) {
-      // ASCII space characters are '\t'..'\r' and ' '.
+      // One byte space characters are '\t'..'\r', ' ' and \u00a0.
       Label success;
       __ cmp(current_character(), ' ');
-      __ j(equal, &success);
+      __ j(equal, &success, Label::kNear);
       // Check range 0x09..0x0d
       __ lea(eax, Operand(current_character(), -'\t'));
       __ cmp(eax, '\r' - '\t');
-      BranchOrBacktrack(above, on_no_match);
+      __ j(below_equal, &success, Label::kNear);
+      // \u00a0 (NBSP).
+      __ cmp(eax, 0x00a0 - '\t');
+      BranchOrBacktrack(not_equal, on_no_match);
       __ bind(&success);
       return true;
     }
     return false;
   case 'S':
-    // Match non-space characters.
-    if (mode_ == ASCII) {
-      // ASCII space characters are '\t'..'\r' and ' '.
-      __ cmp(current_character(), ' ');
-      BranchOrBacktrack(equal, on_no_match);
-      __ lea(eax, Operand(current_character(), -'\t'));
-      __ cmp(eax, '\r' - '\t');
-      BranchOrBacktrack(below_equal, on_no_match);
-      return true;
-    }
+    // The emitted code for generic character classes is good enough.
     return false;
   case 'd':
     // Match ASCII digits ('0'..'9')

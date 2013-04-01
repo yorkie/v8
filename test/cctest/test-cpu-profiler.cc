@@ -1,4 +1,29 @@
 // Copyright 2010 the V8 project authors. All rights reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are
+// met:
+//
+//     * Redistributions of source code must retain the above copyright
+//       notice, this list of conditions and the following disclaimer.
+//     * Redistributions in binary form must reproduce the above
+//       copyright notice, this list of conditions and the following
+//       disclaimer in the documentation and/or other materials provided
+//       with the distribution.
+//     * Neither the name of Google Inc. nor the names of its
+//       contributors may be used to endorse or promote products derived
+//       from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 // Tests of profiles generator and utilities.
 
@@ -20,7 +45,7 @@ using i::TokenEnumerator;
 TEST(StartStop) {
   CpuProfilesCollection profiles;
   ProfileGenerator generator(&profiles);
-  ProfilerEventsProcessor processor(&generator, NULL, 100);
+  ProfilerEventsProcessor processor(&generator);
   processor.Start();
   processor.Stop();
   processor.Join();
@@ -30,7 +55,7 @@ static v8::Persistent<v8::Context> env;
 
 static void InitializeVM() {
   if (env.IsEmpty()) env = v8::Context::New();
-  v8::HandleScope scope;
+  v8::HandleScope scope(env->GetIsolate());
   env->Enter();
 }
 
@@ -84,7 +109,7 @@ TEST(CodeEvents) {
   CpuProfilesCollection profiles;
   profiles.StartProfiling("", 1);
   ProfileGenerator generator(&profiles);
-  ProfilerEventsProcessor processor(&generator, NULL, 100);
+  ProfilerEventsProcessor processor(&generator);
   processor.Start();
 
   // Enqueue code creation events.
@@ -145,7 +170,7 @@ TEST(TickEvents) {
   CpuProfilesCollection profiles;
   profiles.StartProfiling("", 1);
   ProfileGenerator generator(&profiles);
-  ProfilerEventsProcessor processor(&generator, NULL, 100);
+  ProfilerEventsProcessor processor(&generator);
   processor.Start();
 
   processor.CodeCreateEvent(i::Logger::BUILTIN_TAG,
@@ -186,31 +211,6 @@ TEST(TickEvents) {
   const i::List<ProfileNode*>* top_down_ddd_children =
       top_down_stub_children->last()->children();
   CHECK_EQ(0, top_down_ddd_children->length());
-
-  const i::List<ProfileNode*>* bottom_up_root_children_unsorted =
-      profile->bottom_up()->root()->children();
-  CHECK_EQ(3, bottom_up_root_children_unsorted->length());
-  i::List<ProfileNode*> bottom_up_root_children(3);
-  bottom_up_root_children.AddAll(*bottom_up_root_children_unsorted);
-  bottom_up_root_children.Sort(&CompareProfileNodes);
-  CHECK_EQ("5", bottom_up_root_children[0]->entry()->name());
-  CHECK_EQ("bbb", bottom_up_root_children[1]->entry()->name());
-  CHECK_EQ("ddd", bottom_up_root_children[2]->entry()->name());
-  const i::List<ProfileNode*>* bottom_up_stub_children =
-      bottom_up_root_children[0]->children();
-  CHECK_EQ(1, bottom_up_stub_children->length());
-  CHECK_EQ("bbb", bottom_up_stub_children->last()->entry()->name());
-  const i::List<ProfileNode*>* bottom_up_bbb_children =
-      bottom_up_root_children[1]->children();
-  CHECK_EQ(0, bottom_up_bbb_children->length());
-  const i::List<ProfileNode*>* bottom_up_ddd_children =
-      bottom_up_root_children[2]->children();
-  CHECK_EQ(1, bottom_up_ddd_children->length());
-  CHECK_EQ("5", bottom_up_ddd_children->last()->entry()->name());
-  const i::List<ProfileNode*>* bottom_up_ddd_stub_children =
-      bottom_up_ddd_children->last()->children();
-  CHECK_EQ(1, bottom_up_ddd_stub_children->length());
-  CHECK_EQ("bbb", bottom_up_ddd_stub_children->last()->entry()->name());
 }
 
 
@@ -235,7 +235,7 @@ TEST(Issue1398) {
   CpuProfilesCollection profiles;
   profiles.StartProfiling("", 1);
   ProfileGenerator generator(&profiles);
-  ProfilerEventsProcessor processor(&generator, NULL, 100);
+  ProfilerEventsProcessor processor(&generator);
   processor.Start();
 
   processor.CodeCreateEvent(i::Logger::BUILTIN_TAG,
@@ -301,8 +301,8 @@ TEST(DeleteAllCpuProfiles) {
 
 
 TEST(DeleteCpuProfile) {
-  v8::HandleScope scope;
   LocalContext env;
+  v8::HandleScope scope(env->GetIsolate());
 
   CHECK_EQ(0, v8::CpuProfiler::GetProfilesCount());
   v8::Local<v8::String> name1 = v8::String::New("1");
@@ -347,8 +347,8 @@ TEST(DeleteCpuProfile) {
 
 
 TEST(DeleteCpuProfileDifferentTokens) {
-  v8::HandleScope scope;
   LocalContext env;
+  v8::HandleScope scope(env->GetIsolate());
 
   CHECK_EQ(0, v8::CpuProfiler::GetProfilesCount());
   v8::Local<v8::String> name1 = v8::String::New("1");

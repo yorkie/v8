@@ -794,9 +794,11 @@
             ],
             'experimental_library_files': [
               '../../src/macros.py',
+              '../../src/symbol.js',
               '../../src/proxy.js',
               '../../src/collection.js',
-              '../../src/object-observe.js'
+              '../../src/object-observe.js',
+              '../../src/typedarray.js'
             ],
           },
           'actions': [
@@ -1004,7 +1006,7 @@
           'include_dirs++': [
             '<(shim_headers_path)',
           ],
-          'direct_dependent_settings': {
+          'all_dependent_settings': {
             'include_dirs+++': [
               '<(shim_headers_path)',
             ],

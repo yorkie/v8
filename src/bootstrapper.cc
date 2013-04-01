@@ -147,23 +147,13 @@ class Genesis BASE_EMBEDDED {
           v8::ExtensionConfiguration* extensions);
   ~Genesis() { }
 
-  Handle<Context> result() { return result_; }
-
-  Genesis* previous() { return previous_; }
-
   Isolate* isolate() const { return isolate_; }
   Factory* factory() const { return isolate_->factory(); }
   Heap* heap() const { return isolate_->heap(); }
 
+  Handle<Context> result() { return result_; }
+
  private:
-  Handle<Context> native_context_;
-  Isolate* isolate_;
-
-  // There may be more than one active genesis object: When GC is
-  // triggered during environment creation there may be weak handle
-  // processing callbacks which may create new environments.
-  Genesis* previous_;
-
   Handle<Context> native_context() { return native_context_; }
 
   // Creates some basic objects. Used for creating a context from scratch.
@@ -284,7 +274,9 @@ class Genesis BASE_EMBEDDED {
                                   Handle<Context> top_context,
                                   bool use_runtime_context);
 
+  Isolate* isolate_;
   Handle<Context> result_;
+  Handle<Context> native_context_;
 
   // Function instance maps. Function literal maps are created initially with
   // a read only prototype for the processing of JS builtins. Later the function
@@ -310,10 +302,10 @@ Handle<Context> Bootstrapper::CreateEnvironment(
     v8::Handle<v8::ObjectTemplate> global_template,
     v8::ExtensionConfiguration* extensions) {
   HandleScope scope(isolate_);
-  Handle<Context> env;
   Genesis genesis(isolate_, global_object, global_template, extensions);
-  env = genesis.result();
-  if (!env.is_null()) {
+  if (!genesis.result().is_null()) {
+    Handle<Object> ctx(isolate_->global_handles()->Create(*genesis.result()));
+    Handle<Context> env = Handle<Context>::cast(ctx);
     if (InstallExtensions(env, extensions)) {
       return env;
     }
@@ -493,8 +485,7 @@ Handle<JSFunction> Genesis::CreateEmptyFunction(Isolate* isolate) {
 
     Handle<Foreign> object_prototype(
         factory->NewForeign(&Accessors::ObjectPrototype));
-    PropertyAttributes attribs = static_cast<PropertyAttributes>(
-        DONT_ENUM | DONT_DELETE);
+    PropertyAttributes attribs = static_cast<PropertyAttributes>(DONT_ENUM);
     object_prototype_map->set_instance_descriptors(*prototype_descriptors);
 
     {  // Add __proto__.
@@ -700,9 +691,8 @@ void Genesis::CreateRoots() {
   // closure and extension object later (we need the empty function
   // and the global object, but in order to create those, we need the
   // native context).
-  native_context_ = Handle<Context>::cast(isolate()->global_handles()->Create(
-              *factory()->NewNativeContext()));
-  AddToWeakNativeContextList(*native_context_);
+  native_context_ = factory()->NewNativeContext();
+  AddToWeakNativeContextList(*native_context());
   isolate()->set_context(*native_context());
 
   // Allocate the message listeners object.
@@ -831,11 +821,11 @@ void Genesis::HookUpGlobalProxy(Handle<GlobalObject> inner_global,
 
 void Genesis::HookUpInnerGlobal(Handle<GlobalObject> inner_global) {
   Handle<GlobalObject> inner_global_from_snapshot(
-      GlobalObject::cast(native_context_->extension()));
-  Handle<JSBuiltinsObject> builtins_global(native_context_->builtins());
-  native_context_->set_extension(*inner_global);
-  native_context_->set_global_object(*inner_global);
-  native_context_->set_security_token(*inner_global);
+      GlobalObject::cast(native_context()->extension()));
+  Handle<JSBuiltinsObject> builtins_global(native_context()->builtins());
+  native_context()->set_extension(*inner_global);
+  native_context()->set_global_object(*inner_global);
+  native_context()->set_security_token(*inner_global);
   static const PropertyAttributes attributes =
       static_cast<PropertyAttributes>(READ_ONLY | DONT_DELETE);
   ForceSetProperty(builtins_global,
@@ -1290,7 +1280,17 @@ void Genesis::InitializeExperimentalGlobal() {
   Handle<JSObject> global = Handle<JSObject>(native_context()->global_object());
 
   // TODO(mstarzinger): Move this into Genesis::InitializeGlobal once we no
-  // longer need to live behind a flag, so functions get added to the snapshot.
+  // longer need to live behind flags, so functions get added to the snapshot.
+
+  if (FLAG_harmony_symbols) {
+    // --- S y m b o l ---
+    Handle<JSFunction> symbol_fun =
+        InstallFunction(global, "Symbol", JS_VALUE_TYPE, JSValue::kSize,
+                        isolate()->initial_object_prototype(),
+                        Builtins::kIllegal, true);
+    native_context()->set_symbol_function(*symbol_fun);
+  }
+
   if (FLAG_harmony_collections) {
     {  // -- S e t
       Handle<JSObject> prototype =
@@ -1309,6 +1309,16 @@ void Genesis::InitializeExperimentalGlobal() {
           factory()->NewJSObject(isolate()->object_function(), TENURED);
       InstallFunction(global, "WeakMap", JS_WEAK_MAP_TYPE, JSWeakMap::kSize,
                       prototype, Builtins::kIllegal, true);
+    }
+  }
+
+  if (FLAG_harmony_typed_arrays) {
+    { // -- A r r a y B u f f e r
+      Handle<JSObject> prototype =
+          factory()->NewJSObject(isolate()->object_function(), TENURED);
+      InstallFunction(global, "__ArrayBuffer", JS_ARRAY_BUFFER_TYPE,
+                      JSArrayBuffer::kSize, prototype,
+                      Builtins::kIllegal, true);
     }
   }
 }
@@ -1484,8 +1494,14 @@ Handle<JSFunction> Genesis::InstallInternalArray(
       factory()->NewJSObject(isolate()->object_function(), TENURED);
   SetPrototype(array_function, prototype);
 
+  // TODO(mvstanton): For performance reasons, this code would have to
+  // be changed to successfully run with FLAG_optimize_constructed_arrays.
+  // The next checkin to enable FLAG_optimize_constructed_arrays by
+  // default will address this.
+  CHECK(!FLAG_optimize_constructed_arrays);
   array_function->shared()->set_construct_stub(
       isolate()->builtins()->builtin(Builtins::kArrayConstructCode));
+
   array_function->shared()->DontAdaptArguments();
 
   MaybeObject* maybe_map = array_function->initial_map()->Copy();
@@ -1741,7 +1757,6 @@ bool Genesis::InstallNatives() {
     native_context()->set_opaque_reference_function(*opaque_reference_fun);
   }
 
-
   // InternalArrays should not use Smi-Only array optimizations. There are too
   // many places in the C++ runtime code (e.g. RegEx) that assume that
   // elements in InternalArrays can be set to non-Smi values without going
@@ -1893,6 +1908,11 @@ bool Genesis::InstallExperimentalNatives() {
   for (int i = ExperimentalNatives::GetDebuggerCount();
        i < ExperimentalNatives::GetBuiltinsCount();
        i++) {
+    if (FLAG_harmony_symbols &&
+        strcmp(ExperimentalNatives::GetScriptName(i).start(),
+               "native symbol.js") == 0) {
+      if (!CompileExperimentalBuiltin(isolate(), i)) return false;
+    }
     if (FLAG_harmony_proxies &&
         strcmp(ExperimentalNatives::GetScriptName(i).start(),
                "native proxy.js") == 0) {
@@ -1906,6 +1926,11 @@ bool Genesis::InstallExperimentalNatives() {
     if (FLAG_harmony_observation &&
         strcmp(ExperimentalNatives::GetScriptName(i).start(),
                "native object-observe.js") == 0) {
+      if (!CompileExperimentalBuiltin(isolate(), i)) return false;
+    }
+    if (FLAG_harmony_typed_arrays &&
+        strcmp(ExperimentalNatives::GetScriptName(i).start(),
+               "native typedarray.js") == 0) {
       if (!CompileExperimentalBuiltin(isolate(), i)) return false;
     }
   }
@@ -2281,7 +2306,7 @@ void Genesis::TransferNamedProperties(Handle<JSObject> from,
       switch (details.type()) {
         case FIELD: {
           HandleScope inner(isolate());
-          Handle<String> key = Handle<String>(descs->GetKey(i));
+          Handle<Name> key = Handle<Name>(descs->GetKey(i));
           int index = descs->GetFieldIndex(i);
           Handle<Object> value = Handle<Object>(from->FastPropertyAt(index),
                                                 isolate());
@@ -2292,7 +2317,7 @@ void Genesis::TransferNamedProperties(Handle<JSObject> from,
         }
         case CONSTANT_FUNCTION: {
           HandleScope inner(isolate());
-          Handle<String> key = Handle<String>(descs->GetKey(i));
+          Handle<Name> key = Handle<Name>(descs->GetKey(i));
           Handle<JSFunction> fun =
               Handle<JSFunction>(descs->GetConstantFunction(i));
           CHECK_NOT_EMPTY_HANDLE(isolate(),
@@ -2308,7 +2333,7 @@ void Genesis::TransferNamedProperties(Handle<JSObject> from,
           HandleScope inner(isolate());
           ASSERT(!to->HasFastProperties());
           // Add to dictionary.
-          Handle<String> key = Handle<String>(descs->GetKey(i));
+          Handle<Name> key = Handle<Name>(descs->GetKey(i));
           Handle<Object> callbacks(descs->GetCallbacksObject(i), isolate());
           PropertyDetails d = PropertyDetails(details.attributes(),
                                               CALLBACKS,
@@ -2328,19 +2353,19 @@ void Genesis::TransferNamedProperties(Handle<JSObject> from,
       }
     }
   } else {
-    Handle<StringDictionary> properties =
-        Handle<StringDictionary>(from->property_dictionary());
+    Handle<NameDictionary> properties =
+        Handle<NameDictionary>(from->property_dictionary());
     int capacity = properties->Capacity();
     for (int i = 0; i < capacity; i++) {
       Object* raw_key(properties->KeyAt(i));
       if (properties->IsKey(raw_key)) {
-        ASSERT(raw_key->IsString());
+        ASSERT(raw_key->IsName());
         // If the property is already there we skip it.
         LookupResult result(isolate());
-        to->LocalLookup(String::cast(raw_key), &result);
+        to->LocalLookup(Name::cast(raw_key), &result);
         if (result.IsFound()) continue;
         // Set the property.
-        Handle<String> key = Handle<String>(String::cast(raw_key));
+        Handle<Name> key = Handle<Name>(Name::cast(raw_key));
         Handle<Object> value = Handle<Object>(properties->ValueAt(i),
                                               isolate());
         if (value->IsJSGlobalPropertyCell()) {
@@ -2412,7 +2437,6 @@ Genesis::Genesis(Isolate* isolate,
 
   // Before creating the roots we must save the context and restore it
   // on all function exits.
-  HandleScope scope(isolate);
   SaveContext saved_context(isolate);
 
   // During genesis, the boilerplate for stack overflow won't work until the
@@ -2421,12 +2445,10 @@ Genesis::Genesis(Isolate* isolate,
   StackLimitCheck check(isolate);
   if (check.HasOverflowed()) return;
 
-  Handle<Context> new_context = Snapshot::NewContextFromSnapshot();
-  if (!new_context.is_null()) {
-    native_context_ =
-        Handle<Context>::cast(isolate->global_handles()->Create(*new_context));
-    AddToWeakNativeContextList(*native_context_);
-    isolate->set_context(*native_context_);
+  native_context_ = Snapshot::NewContextFromSnapshot();
+  if (!native_context().is_null()) {
+    AddToWeakNativeContextList(*native_context());
+    isolate->set_context(*native_context());
     isolate->counters()->contexts_created_by_snapshot()->Increment();
     Handle<GlobalObject> inner_global;
     Handle<JSGlobalProxy> global_proxy =
@@ -2462,7 +2484,7 @@ Genesis::Genesis(Isolate* isolate,
   InitializeExperimentalGlobal();
   if (!InstallExperimentalNatives()) return;
 
-  result_ = native_context_;
+  result_ = native_context();
 }
 
 
