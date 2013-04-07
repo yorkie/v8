@@ -111,8 +111,10 @@ static bool CPUInfoContainsString(const char * search_string) {
   FILE* f = NULL;
   const char* what = search_string;
 
-  if (NULL == (f = fopen(file_name, "r")))
+  if (NULL == (f = fopen(file_name, "r"))) {
+    OS::PrintError("Failed to open /proc/cpuinfo\n");
     return false;
+  }
 
   int k;
   while (EOF != (k = fgetc(f))) {
@@ -144,9 +146,6 @@ bool OS::ArmCpuHasFeature(CpuFeature feature) {
   // facility is universally available on the ARM architectures,
   // so it's up to individual OSes to provide such.
   switch (feature) {
-    case VFP2:
-      search_string = "vfp";
-      break;
     case VFP3:
       search_string = "vfpv3";
       break;
@@ -1088,7 +1087,7 @@ static void ProfilerSignalHandler(int signal, siginfo_t* info, void* context) {
   if (sampler == NULL || !sampler->IsActive()) return;
 
   TickSample sample_obj;
-  TickSample* sample = CpuProfiler::TickSampleEvent(isolate);
+  TickSample* sample = isolate->cpu_profiler()->TickSampleEvent();
   if (sample == NULL) sample = &sample_obj;
 
   // Extracting the sample from the context is extremely machine dependent.

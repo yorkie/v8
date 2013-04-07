@@ -2508,7 +2508,10 @@ void Name::set_hash_field(uint32_t value) {
 
 bool Name::Equals(Name* other) {
   if (other == this) return true;
-  if (this->IsUniqueName() && other->IsUniqueName()) return false;
+  if (this->IsSymbol() || other->IsSymbol() ||
+      (this->IsInternalizedString() && other->IsInternalizedString())) {
+    return false;
+  }
   return String::cast(this)->SlowEquals(String::cast(other));
 }
 
@@ -4519,6 +4522,7 @@ BOOL_ACCESSORS(SharedFunctionInfo, compiler_hints, dont_optimize,
                kDontOptimize)
 BOOL_ACCESSORS(SharedFunctionInfo, compiler_hints, dont_inline, kDontInline)
 BOOL_ACCESSORS(SharedFunctionInfo, compiler_hints, dont_cache, kDontCache)
+BOOL_ACCESSORS(SharedFunctionInfo, compiler_hints, is_generator, kIsGenerator)
 
 void SharedFunctionInfo::BeforeVisitingPointers() {
   if (IsInobjectSlackTrackingInProgress()) DetachInitialMap();

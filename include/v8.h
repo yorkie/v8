@@ -103,12 +103,14 @@ class Array;
 class Boolean;
 class BooleanObject;
 class Context;
+class CpuProfiler;
 class Data;
 class Date;
 class DeclaredAccessorDescriptor;
 class External;
 class Function;
 class FunctionTemplate;
+class HeapProfiler;
 class ImplementationUtilities;
 class Int32;
 class Integer;
@@ -3022,6 +3024,18 @@ class V8EXPORT Isolate {
    */
   intptr_t AdjustAmountOfExternalAllocatedMemory(intptr_t change_in_bytes);
 
+  /**
+   * Returns heap profiler for this isolate. Will return NULL until the isolate
+   * is initialized.
+   */
+  HeapProfiler* GetHeapProfiler();
+
+  /**
+   * Returns CPU profiler for this isolate. Will return NULL until the isolate
+   * is initialized.
+   */
+  CpuProfiler* GetCpuProfiler();
+
  private:
   Isolate();
   Isolate(const Isolate&);
@@ -3878,6 +3892,7 @@ class V8EXPORT Context {
 
   /** Returns the context that is on the top of the stack. */
   static Local<Context> GetCurrent();
+  static Local<Context> GetCurrent(Isolate* isolate);
 
   /**
    * Returns the context of the calling JavaScript code.  That is the
@@ -4287,7 +4302,7 @@ class Internals {
   static const int kNullValueRootIndex = 7;
   static const int kTrueValueRootIndex = 8;
   static const int kFalseValueRootIndex = 9;
-  static const int kEmptyStringRootIndex = 119;
+  static const int kEmptyStringRootIndex = 118;
 
   static const int kNodeClassIdOffset = 1 * kApiPointerSize;
   static const int kNodeFlagsOffset = 1 * kApiPointerSize + 3;

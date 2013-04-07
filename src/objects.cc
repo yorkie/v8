@@ -98,6 +98,10 @@ MaybeObject* Object::ToObject() {
     Isolate* isolate = HeapObject::cast(this)->GetIsolate();
     Context* native_context = isolate->context()->native_context();
     return CreateJSValue(native_context->string_function(), this);
+  } else if (IsSymbol()) {
+    Isolate* isolate = HeapObject::cast(this)->GetIsolate();
+    Context* native_context = isolate->context()->native_context();
+    return CreateJSValue(native_context->symbol_function(), this);
   }
 
   // Throw a type error.
@@ -4689,6 +4693,145 @@ MaybeObject* JSObject::PreventExtensions() {
 }
 
 
+MUST_USE_RESULT MaybeObject* JSObject::DeepCopy(Isolate* isolate) {
+  StackLimitCheck check(isolate);
+  if (check.HasOverflowed()) return isolate->StackOverflow();
+
+  Heap* heap = isolate->heap();
+  Object* result;
+  { MaybeObject* maybe_result = heap->CopyJSObject(this);
+    if (!maybe_result->ToObject(&result)) return maybe_result;
+  }
+  JSObject* copy = JSObject::cast(result);
+
+  // Deep copy local properties.
+  if (copy->HasFastProperties()) {
+    FixedArray* properties = copy->properties();
+    for (int i = 0; i < properties->length(); i++) {
+      Object* value = properties->get(i);
+      if (value->IsJSObject()) {
+        JSObject* js_object = JSObject::cast(value);
+        { MaybeObject* maybe_result = js_object->DeepCopy(isolate);
+          if (!maybe_result->ToObject(&result)) return maybe_result;
+        }
+        properties->set(i, result);
+      }
+    }
+    int nof = copy->map()->inobject_properties();
+    for (int i = 0; i < nof; i++) {
+      Object* value = copy->InObjectPropertyAt(i);
+      if (value->IsJSObject()) {
+        JSObject* js_object = JSObject::cast(value);
+        { MaybeObject* maybe_result = js_object->DeepCopy(isolate);
+          if (!maybe_result->ToObject(&result)) return maybe_result;
+        }
+        copy->InObjectPropertyAtPut(i, result);
+      }
+    }
+  } else {
+    { MaybeObject* maybe_result =
+          heap->AllocateFixedArray(copy->NumberOfLocalProperties());
+      if (!maybe_result->ToObject(&result)) return maybe_result;
+    }
+    FixedArray* names = FixedArray::cast(result);
+    copy->GetLocalPropertyNames(names, 0);
+    for (int i = 0; i < names->length(); i++) {
+      ASSERT(names->get(i)->IsString());
+      String* key_string = String::cast(names->get(i));
+      PropertyAttributes attributes =
+          copy->GetLocalPropertyAttribute(key_string);
+      // Only deep copy fields from the object literal expression.
+      // In particular, don't try to copy the length attribute of
+      // an array.
+      if (attributes != NONE) continue;
+      Object* value =
+          copy->GetProperty(key_string, &attributes)->ToObjectUnchecked();
+      if (value->IsJSObject()) {
+        JSObject* js_object = JSObject::cast(value);
+        { MaybeObject* maybe_result = js_object->DeepCopy(isolate);
+          if (!maybe_result->ToObject(&result)) return maybe_result;
+        }
+        { MaybeObject* maybe_result =
+              // Creating object copy for literals. No strict mode needed.
+              copy->SetProperty(key_string, result, NONE, kNonStrictMode);
+          if (!maybe_result->ToObject(&result)) return maybe_result;
+        }
+      }
+    }
+  }
+
+  // Deep copy local elements.
+  // Pixel elements cannot be created using an object literal.
+  ASSERT(!copy->HasExternalArrayElements());
+  switch (copy->GetElementsKind()) {
+    case FAST_SMI_ELEMENTS:
+    case FAST_ELEMENTS:
+    case FAST_HOLEY_SMI_ELEMENTS:
+    case FAST_HOLEY_ELEMENTS: {
+      FixedArray* elements = FixedArray::cast(copy->elements());
+      if (elements->map() == heap->fixed_cow_array_map()) {
+        isolate->counters()->cow_arrays_created_runtime()->Increment();
+#ifdef DEBUG
+        for (int i = 0; i < elements->length(); i++) {
+          ASSERT(!elements->get(i)->IsJSObject());
+        }
+#endif
+      } else {
+        for (int i = 0; i < elements->length(); i++) {
+          Object* value = elements->get(i);
+          ASSERT(value->IsSmi() ||
+                 value->IsTheHole() ||
+                 (IsFastObjectElementsKind(copy->GetElementsKind())));
+          if (value->IsJSObject()) {
+            JSObject* js_object = JSObject::cast(value);
+            { MaybeObject* maybe_result = js_object->DeepCopy(isolate);
+              if (!maybe_result->ToObject(&result)) return maybe_result;
+            }
+            elements->set(i, result);
+          }
+        }
+      }
+      break;
+    }
+    case DICTIONARY_ELEMENTS: {
+      SeededNumberDictionary* element_dictionary = copy->element_dictionary();
+      int capacity = element_dictionary->Capacity();
+      for (int i = 0; i < capacity; i++) {
+        Object* k = element_dictionary->KeyAt(i);
+        if (element_dictionary->IsKey(k)) {
+          Object* value = element_dictionary->ValueAt(i);
+          if (value->IsJSObject()) {
+            JSObject* js_object = JSObject::cast(value);
+            { MaybeObject* maybe_result = js_object->DeepCopy(isolate);
+              if (!maybe_result->ToObject(&result)) return maybe_result;
+            }
+            element_dictionary->ValueAtPut(i, result);
+          }
+        }
+      }
+      break;
+    }
+    case NON_STRICT_ARGUMENTS_ELEMENTS:
+      UNIMPLEMENTED();
+      break;
+    case EXTERNAL_PIXEL_ELEMENTS:
+    case EXTERNAL_BYTE_ELEMENTS:
+    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
+    case EXTERNAL_SHORT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
+    case EXTERNAL_INT_ELEMENTS:
+    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
+    case EXTERNAL_FLOAT_ELEMENTS:
+    case EXTERNAL_DOUBLE_ELEMENTS:
+    case FAST_DOUBLE_ELEMENTS:
+    case FAST_HOLEY_DOUBLE_ELEMENTS:
+      // No contained objects, nothing to do.
+      break;
+  }
+  return copy;
+}
+
+
 // Tests for the fast common case for property enumeration:
 // - This object and all prototypes has an enum cache (which means that
 //   it is no proxy, has no interceptors and needs no access checks).
@@ -8849,12 +8992,13 @@ void Code::CopyFrom(const CodeDesc& desc) {
   ASSERT(Marking::Color(this) == Marking::WHITE_OBJECT);
 
   // copy code
-  CopyBytes(instruction_start(), desc.buffer, desc.instr_size);
+  CopyBytes(instruction_start(), desc.buffer,
+            static_cast<size_t>(desc.instr_size));
 
   // copy reloc info
   CopyBytes(relocation_start(),
             desc.buffer + desc.buffer_size - desc.reloc_size,
-            desc.reloc_size);
+            static_cast<size_t>(desc.reloc_size));
 
   // unbox handles and relocate
   intptr_t delta = instruction_start() - desc.buffer;
@@ -9787,9 +9931,14 @@ MaybeObject* Map::PutPrototypeTransition(Object* prototype, Map* map) {
 
 void Map::ZapTransitions() {
   TransitionArray* transition_array = transitions();
-  MemsetPointer(transition_array->data_start(),
-                GetHeap()->the_hole_value(),
-                transition_array->length());
+  // TODO(mstarzinger): Temporarily use a slower version instead of the faster
+  // MemsetPointer to investigate a crasher. Switch back to MemsetPointer.
+  Object** data = transition_array->data_start();
+  Object* the_hole = GetHeap()->the_hole_value();
+  int length = transition_array->length();
+  for (int i = 0; i < length; i++) {
+    data[i] = the_hole;
+  }
 }
 
 
@@ -11396,9 +11545,8 @@ MaybeObject* JSObject::GetPropertyWithInterceptor(
 }
 
 
-bool JSObject::HasRealNamedProperty(Name* key) {
+bool JSObject::HasRealNamedProperty(Isolate* isolate, Name* key) {
   // Check access rights if needed.
-  Isolate* isolate = GetIsolate();
   if (IsAccessCheckNeeded()) {
     if (!isolate->MayNamedAccess(this, key, v8::ACCESS_HAS)) {
       isolate->ReportFailedAccessCheck(this, v8::ACCESS_HAS);
@@ -11412,73 +11560,21 @@ bool JSObject::HasRealNamedProperty(Name* key) {
 }
 
 
-bool JSObject::HasRealElementProperty(uint32_t index) {
+bool JSObject::HasRealElementProperty(Isolate* isolate, uint32_t index) {
   // Check access rights if needed.
   if (IsAccessCheckNeeded()) {
-    Heap* heap = GetHeap();
-    if (!heap->isolate()->MayIndexedAccess(this, index, v8::ACCESS_HAS)) {
-      heap->isolate()->ReportFailedAccessCheck(this, v8::ACCESS_HAS);
+    if (!isolate->MayIndexedAccess(this, index, v8::ACCESS_HAS)) {
+      isolate->ReportFailedAccessCheck(this, v8::ACCESS_HAS);
       return false;
     }
   }
 
-  // Handle [] on String objects.
-  if (this->IsStringObjectWithCharacterAt(index)) return true;
-
-  switch (GetElementsKind()) {
-    case FAST_SMI_ELEMENTS:
-    case FAST_ELEMENTS:
-    case FAST_HOLEY_SMI_ELEMENTS:
-    case FAST_HOLEY_ELEMENTS: {
-     uint32_t length = IsJSArray() ?
-          static_cast<uint32_t>(
-              Smi::cast(JSArray::cast(this)->length())->value()) :
-          static_cast<uint32_t>(FixedArray::cast(elements())->length());
-      return (index < length) &&
-          !FixedArray::cast(elements())->get(index)->IsTheHole();
-    }
-    case FAST_DOUBLE_ELEMENTS:
-    case FAST_HOLEY_DOUBLE_ELEMENTS: {
-      uint32_t length = IsJSArray() ?
-          static_cast<uint32_t>(
-              Smi::cast(JSArray::cast(this)->length())->value()) :
-          static_cast<uint32_t>(FixedDoubleArray::cast(elements())->length());
-      return (index < length) &&
-          !FixedDoubleArray::cast(elements())->is_the_hole(index);
-      break;
-    }
-    case EXTERNAL_PIXEL_ELEMENTS: {
-      ExternalPixelArray* pixels = ExternalPixelArray::cast(elements());
-      return index < static_cast<uint32_t>(pixels->length());
-    }
-    case EXTERNAL_BYTE_ELEMENTS:
-    case EXTERNAL_UNSIGNED_BYTE_ELEMENTS:
-    case EXTERNAL_SHORT_ELEMENTS:
-    case EXTERNAL_UNSIGNED_SHORT_ELEMENTS:
-    case EXTERNAL_INT_ELEMENTS:
-    case EXTERNAL_UNSIGNED_INT_ELEMENTS:
-    case EXTERNAL_FLOAT_ELEMENTS:
-    case EXTERNAL_DOUBLE_ELEMENTS: {
-      ExternalArray* array = ExternalArray::cast(elements());
-      return index < static_cast<uint32_t>(array->length());
-    }
-    case DICTIONARY_ELEMENTS: {
-      return element_dictionary()->FindEntry(index)
-          != SeededNumberDictionary::kNotFound;
-    }
-    case NON_STRICT_ARGUMENTS_ELEMENTS:
-      UNIMPLEMENTED();
-      break;
-  }
-  // All possibilities have been handled above already.
-  UNREACHABLE();
-  return GetHeap()->null_value();
+  return GetElementAttributeWithoutInterceptor(this, index, false) != ABSENT;
 }
 
 
-bool JSObject::HasRealNamedCallbackProperty(Name* key) {
+bool JSObject::HasRealNamedCallbackProperty(Isolate* isolate, Name* key) {
   // Check access rights if needed.
-  Isolate* isolate = GetIsolate();
   if (IsAccessCheckNeeded()) {
     if (!isolate->MayNamedAccess(this, key, v8::ACCESS_HAS)) {
       isolate->ReportFailedAccessCheck(this, v8::ACCESS_HAS);

@@ -291,8 +291,6 @@ void MacroAssembler::Move(Register dst, Register src, Condition cond) {
 
 
 void MacroAssembler::Move(DwVfpRegister dst, DwVfpRegister src) {
-  ASSERT(CpuFeatures::IsSupported(VFP2));
-  CpuFeatureScope scope(this, VFP2);
   if (!dst.is(src)) {
     vmov(dst, src);
   }
@@ -708,15 +706,14 @@ void MacroAssembler::Ldrd(Register dst1, Register dst2,
                           const MemOperand& src, Condition cond) {
   ASSERT(src.rm().is(no_reg));
   ASSERT(!dst1.is(lr));  // r14.
-  ASSERT_EQ(0, dst1.code() % 2);
-  ASSERT_EQ(dst1.code() + 1, dst2.code());
 
   // V8 does not use this addressing mode, so the fallback code
   // below doesn't support it yet.
   ASSERT((src.am() != PreIndex) && (src.am() != NegPreIndex));
 
   // Generate two ldr instructions if ldrd is not available.
-  if (CpuFeatures::IsSupported(ARMv7) && !predictable_code_size()) {
+  if (CpuFeatures::IsSupported(ARMv7) && !predictable_code_size() &&
+      (dst1.code() % 2 == 0) && (dst1.code() + 1 == dst2.code())) {
     CpuFeatureScope scope(this, ARMv7);
     ldrd(dst1, dst2, src, cond);
   } else {
@@ -750,15 +747,14 @@ void MacroAssembler::Strd(Register src1, Register src2,
                           const MemOperand& dst, Condition cond) {
   ASSERT(dst.rm().is(no_reg));
   ASSERT(!src1.is(lr));  // r14.
-  ASSERT_EQ(0, src1.code() % 2);
-  ASSERT_EQ(src1.code() + 1, src2.code());
 
   // V8 does not use this addressing mode, so the fallback code
   // below doesn't support it yet.
   ASSERT((dst.am() != PreIndex) && (dst.am() != NegPreIndex));
 
   // Generate two str instructions if strd is not available.
-  if (CpuFeatures::IsSupported(ARMv7) && !predictable_code_size()) {
+  if (CpuFeatures::IsSupported(ARMv7) && !predictable_code_size() &&
+      (src1.code() % 2 == 0) && (src1.code() + 1 == src2.code())) {
     CpuFeatureScope scope(this, ARMv7);
     strd(src1, src2, dst, cond);
   } else {
@@ -813,7 +809,6 @@ void MacroAssembler::VFPCompareAndLoadFlags(const DwVfpRegister src1,
 void MacroAssembler::Vmov(const DwVfpRegister dst,
                           const double imm,
                           const Register scratch) {
-  ASSERT(IsEnabled(VFP2));
   static const DoubleRepresentation minus_zero(-0.0);
   static const DoubleRepresentation zero(0.0);
   DoubleRepresentation value(imm);
@@ -875,7 +870,6 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, int stack_space) {
 
   // Optionally save all double registers.
   if (save_doubles) {
-    CpuFeatureScope scope(this, VFP2);
     // Check CPU flags for number of registers, setting the Z condition flag.
     CheckFor32DRegs(ip);
 
@@ -940,7 +934,6 @@ void MacroAssembler::LeaveExitFrame(bool save_doubles,
                                     Register argument_count) {
   // Optionally restore all double registers.
   if (save_doubles) {
-    CpuFeatureScope scope(this, VFP2);
     // Calculate the stack location of the saved doubles and restore them.
     const int offset = 2 * kPointerSize;
     sub(r3, fp,
@@ -977,7 +970,6 @@ void MacroAssembler::LeaveExitFrame(bool save_doubles,
 }
 
 void MacroAssembler::GetCFunctionDoubleResult(const DwVfpRegister dst) {
-  ASSERT(CpuFeatures::IsSupported(VFP2));
   if (use_eabi_hardfloat()) {
     Move(dst, d0);
   } else {
@@ -1404,7 +1396,6 @@ void MacroAssembler::CheckAccessGlobalProxy(Register holder_reg,
 
   // Check the context is a native context.
   if (emit_debug_code()) {
-    // TODO(119): avoid push(holder_reg)/pop(holder_reg)
     // Cannot use ip as a temporary in this verification code. Due to the fact
     // that ip is clobbered as part of cmp with an object Operand.
     push(holder_reg);  // Temporarily save holder on the stack.
@@ -1423,7 +1414,6 @@ void MacroAssembler::CheckAccessGlobalProxy(Register holder_reg,
 
   // Check the context is a native context.
   if (emit_debug_code()) {
-    // TODO(119): avoid push(holder_reg)/pop(holder_reg)
     // Cannot use ip as a temporary in this verification code. Due to the fact
     // that ip is clobbered as part of cmp with an object Operand.
     push(holder_reg);  // Temporarily save holder on the stack.
@@ -2050,11 +2040,7 @@ void MacroAssembler::StoreNumberToDoubleElements(Register value_reg,
   // scratch1 is now effective address of the double element
 
   FloatingPointHelper::Destination destination;
-  if (CpuFeatures::IsSupported(VFP2)) {
-    destination = FloatingPointHelper::kVFPRegisters;
-  } else {
-    destination = FloatingPointHelper::kCoreRegisters;
-  }
+  destination = FloatingPointHelper::kVFPRegisters;
 
   Register untagged_value = elements_reg;
   SmiUntag(untagged_value, value_reg);
@@ -2067,7 +2053,6 @@ void MacroAssembler::StoreNumberToDoubleElements(Register value_reg,
                                           scratch4,
                                           s2);
   if (destination == FloatingPointHelper::kVFPRegisters) {
-    CpuFeatureScope scope(this, VFP2);
     vstr(d0, scratch1, 0);
   } else {
     str(mantissa_reg, MemOperand(scratch1, 0));
@@ -2427,9 +2412,6 @@ void MacroAssembler::SmiToDoubleVFPRegister(Register smi,
 void MacroAssembler::TestDoubleIsInt32(DwVfpRegister double_input,
                                        DwVfpRegister double_scratch) {
   ASSERT(!double_input.is(double_scratch));
-  ASSERT(CpuFeatures::IsSupported(VFP2));
-  CpuFeatureScope scope(this, VFP2);
-
   vcvt_s32_f64(double_scratch.low(), double_input);
   vcvt_f64_s32(double_scratch, double_scratch.low());
   VFPCompareAndSetFlags(double_input, double_scratch);
@@ -2440,9 +2422,6 @@ void MacroAssembler::TryDoubleToInt32Exact(Register result,
                                            DwVfpRegister double_input,
                                            DwVfpRegister double_scratch) {
   ASSERT(!double_input.is(double_scratch));
-  ASSERT(CpuFeatures::IsSupported(VFP2));
-  CpuFeatureScope scope(this, VFP2);
-
   vcvt_s32_f64(double_scratch.low(), double_input);
   vmov(result, double_scratch.low());
   vcvt_f64_s32(double_scratch, double_scratch.low());
@@ -2458,8 +2437,6 @@ void MacroAssembler::TryInt32Floor(Register result,
                                    Label* exact) {
   ASSERT(!result.is(input_high));
   ASSERT(!double_input.is(double_scratch));
-  ASSERT(CpuFeatures::IsSupported(VFP2));
-  CpuFeatureScope scope(this, VFP2);
   Label negative, exception;
 
   // Test for NaN and infinities.
@@ -2499,31 +2476,23 @@ void MacroAssembler::TryInt32Floor(Register result,
 
 void MacroAssembler::ECMAConvertNumberToInt32(Register source,
                                               Register result,
-                                              Register scratch,
-                                              Register input_high,
                                               Register input_low,
+                                              Register input_high,
+                                              Register scratch,
                                               DwVfpRegister double_scratch1,
                                               DwVfpRegister double_scratch2) {
-  if (CpuFeatures::IsSupported(VFP2)) {
-    CpuFeatureScope scope(this, VFP2);
-    vldr(double_scratch1, FieldMemOperand(source, HeapNumber::kValueOffset));
-    ECMAToInt32VFP(result, double_scratch1, double_scratch2,
-                   scratch, input_high, input_low);
-  } else {
-    Ldrd(input_low, input_high,
-         FieldMemOperand(source, HeapNumber::kValueOffset));
-    ECMAToInt32NoVFP(result, scratch, input_high, input_low);
-  }
+  vldr(double_scratch1, FieldMemOperand(source, HeapNumber::kValueOffset));
+  ECMAToInt32(result, double_scratch1, double_scratch2,
+              scratch, input_high, input_low);
 }
 
 
-void MacroAssembler::ECMAToInt32VFP(Register result,
-                                    DwVfpRegister double_input,
-                                    DwVfpRegister double_scratch,
-                                    Register scratch,
-                                    Register input_high,
-                                    Register input_low) {
-  CpuFeatureScope scope(this, VFP2);
+void MacroAssembler::ECMAToInt32(Register result,
+                                 DwVfpRegister double_input,
+                                 DwVfpRegister double_scratch,
+                                 Register scratch,
+                                 Register input_high,
+                                 Register input_low) {
   ASSERT(!input_high.is(result));
   ASSERT(!input_low.is(result));
   ASSERT(!input_low.is(input_high));
@@ -2558,56 +2527,6 @@ void MacroAssembler::ECMAToInt32VFP(Register result,
   // If we reach this code, 31 <= exponent <= 83.
   // So, we don't have to handle cases where 0 <= exponent <= 20 for
   // which we would need to shift right the high part of the mantissa.
-  ECMAToInt32Tail(result, scratch, input_high, input_low,
-                  &out_of_range, &negate, &done);
-}
-
-
-void MacroAssembler::ECMAToInt32NoVFP(Register result,
-                                      Register scratch,
-                                      Register input_high,
-                                      Register input_low) {
-  ASSERT(!result.is(scratch));
-  ASSERT(!result.is(input_high));
-  ASSERT(!result.is(input_low));
-  ASSERT(!scratch.is(input_high));
-  ASSERT(!scratch.is(input_low));
-  ASSERT(!input_high.is(input_low));
-
-  Label both, out_of_range, negate, done;
-
-  Ubfx(scratch, input_high,
-       HeapNumber::kExponentShift, HeapNumber::kExponentBits);
-  // Load scratch with exponent - 1. This is faster than loading
-  // with exponent because Bias + 1 = 1024 which is an *ARM* immediate value.
-  sub(scratch, scratch, Operand(HeapNumber::kExponentBias + 1));
-  // If exponent is negative, 0 < input < 1, the result is 0.
-  // If exponent is greater than or equal to 84, the 32 less significant
-  // bits are 0s (2^84 = 1, 52 significant bits, 32 uncoded bits),
-  // the result is 0.
-  // This test also catch Nan and infinities which also return 0.
-  // Compare exponent with 84 (compare exponent - 1 with 83).
-  cmp(scratch, Operand(83));
-  // We do an unsigned comparison so negative numbers are treated as big
-  // positive number and the two tests above are done in one test.
-  b(hs, &out_of_range);
-
-  // Load scratch with 20 - exponent (load with 19 - (exponent - 1)).
-  rsb(scratch, scratch, Operand(19), SetCC);
-  b(mi, &both);
-
-  // 0 <= exponent <= 20, shift only input_high.
-  // Scratch contains: 20 - exponent.
-  Ubfx(result, input_high,
-       0, HeapNumber::kMantissaBitsInTopWord);
-  // Set the implicit 1 before the mantissa part in input_high.
-  orr(result, result, Operand(1 << HeapNumber::kMantissaBitsInTopWord));
-  mov(result, Operand(result, LSR, scratch));
-  b(&negate);
-
-  bind(&both);
-  // Restore scratch to exponent - 1 to be consistent with ECMAToInt32VFP.
-  rsb(scratch, scratch, Operand(19));
   ECMAToInt32Tail(result, scratch, input_high, input_low,
                   &out_of_range, &negate, &done);
 }
@@ -2715,10 +2634,7 @@ void MacroAssembler::CallRuntimeSaveDoubles(Runtime::FunctionId id) {
   const Runtime::Function* function = Runtime::FunctionForId(id);
   mov(r0, Operand(function->nargs));
   mov(r1, Operand(ExternalReference(function, isolate())));
-  SaveFPRegsMode mode = CpuFeatures::IsSupported(VFP2)
-      ? kSaveFPRegs
-      : kDontSaveFPRegs;
-  CEntryStub stub(1, mode);
+  CEntryStub stub(1, kSaveFPRegs);
   CallStub(&stub);
 }
 
@@ -3463,7 +3379,6 @@ void MacroAssembler::PrepareCallCFunction(int num_reg_arguments,
 
 
 void MacroAssembler::SetCallCDoubleArguments(DwVfpRegister dreg) {
-  ASSERT(CpuFeatures::IsSupported(VFP2));
   if (use_eabi_hardfloat()) {
     Move(d0, dreg);
   } else {
@@ -3474,7 +3389,6 @@ void MacroAssembler::SetCallCDoubleArguments(DwVfpRegister dreg) {
 
 void MacroAssembler::SetCallCDoubleArguments(DwVfpRegister dreg1,
                                              DwVfpRegister dreg2) {
-  ASSERT(CpuFeatures::IsSupported(VFP2));
   if (use_eabi_hardfloat()) {
     if (dreg2.is(d0)) {
       ASSERT(!dreg1.is(d1));
@@ -3493,7 +3407,6 @@ void MacroAssembler::SetCallCDoubleArguments(DwVfpRegister dreg1,
 
 void MacroAssembler::SetCallCDoubleArguments(DwVfpRegister dreg,
                                              Register reg) {
-  ASSERT(CpuFeatures::IsSupported(VFP2));
   if (use_eabi_hardfloat()) {
     Move(d0, dreg);
     Move(r0, reg);

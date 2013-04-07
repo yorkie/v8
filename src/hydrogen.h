@@ -939,8 +939,6 @@ class HGraphBuilder {
       KeyedAccessStoreMode store_mode,
       Representation checked_index_representation = Representation::None());
 
-  HInstruction* BuildFastArrayLengthLoad(HValue* object, HValue* typecheck);
-
   HInstruction* BuildStoreMap(HValue* object, HValue* map, BailoutId id);
   HInstruction* BuildStoreMap(HValue* object, Handle<Map> map, BailoutId id);
 
@@ -1044,6 +1042,14 @@ class HGraphBuilder {
                                 ElementsKind kind,
                                 HValue* capacity);
 
+  void BuildInitializeElements(HValue* elements,
+                               ElementsKind kind,
+                               HValue* capacity);
+
+  HValue* BuildAllocateAndInitializeElements(HValue* context,
+                                             ElementsKind kind,
+                                             HValue* capacity);
+
   HValue* BuildGrowElementsCapacity(HValue* object,
                                     HValue* elements,
                                     ElementsKind kind,
@@ -1063,6 +1069,13 @@ class HGraphBuilder {
                          ElementsKind to_elements_kind,
                          HValue* length,
                          HValue* capacity);
+
+  HValue* BuildCloneShallowArray(HContext* context,
+                                 HValue* boilerplate,
+                                 AllocationSiteMode mode,
+                                 ElementsKind kind,
+                                 BailoutId id,
+                                 int length);
 
  private:
   HGraphBuilder();

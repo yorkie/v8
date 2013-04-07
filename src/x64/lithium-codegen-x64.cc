@@ -1574,13 +1574,6 @@ void LCodeGen::DoConstantT(LConstantT* instr) {
 }
 
 
-void LCodeGen::DoJSArrayLength(LJSArrayLength* instr) {
-  Register result = ToRegister(instr->result());
-  Register array = ToRegister(instr->value());
-  __ movq(result, FieldOperand(array, JSArray::kLengthOffset));
-}
-
-
 void LCodeGen::DoFixedArrayBaseLength(LFixedArrayBaseLength* instr) {
   Register result = ToRegister(instr->result());
   Register array = ToRegister(instr->value());
@@ -4984,7 +4977,6 @@ void LCodeGen::DoClampTToUint8(LClampTToUint8* instr) {
 
 
 void LCodeGen::DoCheckPrototypeMaps(LCheckPrototypeMaps* instr) {
-  ASSERT(instr->temp()->Equals(instr->result()));
   Register reg = ToRegister(instr->temp());
 
   ZoneList<Handle<JSObject> >* prototypes = instr->prototypes();
@@ -4996,7 +4988,6 @@ void LCodeGen::DoCheckPrototypeMaps(LCheckPrototypeMaps* instr) {
     for (int i = 0; i < maps->length(); i++) {
       prototype_maps_.Add(maps->at(i), info()->zone());
     }
-    __ LoadHeapObject(reg, prototypes->at(prototypes->length() - 1));
   } else {
     for (int i = 0; i < prototypes->length(); i++) {
       __ LoadHeapObject(reg, prototypes->at(i));
@@ -5176,26 +5167,33 @@ void LCodeGen::DoArrayLiteral(LArrayLiteral* instr) {
     DeoptimizeIf(not_equal, instr->environment());
   }
 
-  // Set up the parameters to the stub/runtime call.
-  __ PushHeapObject(literals);
-  __ Push(Smi::FromInt(instr->hydrogen()->literal_index()));
-  // Boilerplate already exists, constant elements are never accessed.
-  // Pass an empty fixed array.
-  __ Push(isolate()->factory()->empty_fixed_array());
-
-  // Pick the right runtime function or stub to call.
+  // Set up the parameters to the stub/runtime call and pick the right
+  // runtime function or stub to call. Boilerplate already exists,
+  // constant elements are never accessed, pass an empty fixed array.
   int length = instr->hydrogen()->length();
   if (instr->hydrogen()->IsCopyOnWrite()) {
     ASSERT(instr->hydrogen()->depth() == 1);
+    __ LoadHeapObject(rax, literals);
+    __ Move(rbx, Smi::FromInt(instr->hydrogen()->literal_index()));
+    __ Move(rcx, isolate()->factory()->empty_fixed_array());
     FastCloneShallowArrayStub::Mode mode =
         FastCloneShallowArrayStub::COPY_ON_WRITE_ELEMENTS;
     FastCloneShallowArrayStub stub(mode, DONT_TRACK_ALLOCATION_SITE, length);
     CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
   } else if (instr->hydrogen()->depth() > 1) {
+    __ PushHeapObject(literals);
+    __ Push(Smi::FromInt(instr->hydrogen()->literal_index()));
+    __ Push(isolate()->factory()->empty_fixed_array());
     CallRuntime(Runtime::kCreateArrayLiteral, 3, instr);
   } else if (length > FastCloneShallowArrayStub::kMaximumClonedLength) {
+    __ PushHeapObject(literals);
+    __ Push(Smi::FromInt(instr->hydrogen()->literal_index()));
+    __ Push(isolate()->factory()->empty_fixed_array());
     CallRuntime(Runtime::kCreateArrayLiteralShallow, 3, instr);
   } else {
+    __ LoadHeapObject(rax, literals);
+    __ Move(rbx, Smi::FromInt(instr->hydrogen()->literal_index()));
+    __ Move(rcx, isolate()->factory()->empty_fixed_array());
     FastCloneShallowArrayStub::Mode mode =
         boilerplate_elements_kind == FAST_DOUBLE_ELEMENTS
         ? FastCloneShallowArrayStub::CLONE_DOUBLE_ELEMENTS

@@ -960,29 +960,21 @@ class MacroAssembler: public Assembler {
   // Exits with 'result' holding the answer.
   void ECMAConvertNumberToInt32(Register source,
                                 Register result,
-                                Register scratch,
-                                Register input_high,
                                 Register input_low,
+                                Register input_high,
+                                Register scratch,
                                 DwVfpRegister double_scratch1,
                                 DwVfpRegister double_scratch2);
 
   // Performs a truncating conversion of a floating point number as used by
   // the JS bitwise operations. See ECMA-262 9.5: ToInt32.
   // Exits with 'result' holding the answer and all other registers clobbered.
-  void ECMAToInt32VFP(Register result,
-                      DwVfpRegister double_input,
-                      DwVfpRegister double_scratch,
-                      Register scratch,
-                      Register input_high,
-                      Register input_low);
-
-  // Performs a truncating conversion of a floating point number as used by
-  // the JS bitwise operations. See ECMA-262 9.5: ToInt32.
-  // Exits with 'result' holding the answer.
-  void ECMAToInt32NoVFP(Register result,
-                        Register scratch,
-                        Register input_high,
-                        Register input_low);
+  void ECMAToInt32(Register result,
+                   DwVfpRegister double_input,
+                   DwVfpRegister double_scratch,
+                   Register scratch,
+                   Register input_high,
+                   Register input_low);
 
   // Count leading zeros in a 32 bit word.  On ARM5 and later it uses the clz
   // instruction.  On pre-ARM5 hardware this routine gives the wrong answer
