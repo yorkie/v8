@@ -65,7 +65,6 @@ bool LCodeGen::GenerateCode() {
   HPhase phase("Z_Code generation", chunk());
   ASSERT(is_unused());
   status_ = GENERATING;
-  CpuFeatureScope scope(masm(), FPU);
 
   // Open a frame scope to indicate that there is a frame on the stack.  The
   // NONE indicates that the scope shouldn't actually generate code to set up
@@ -1489,13 +1488,6 @@ void LCodeGen::DoConstantT(LConstantT* instr) {
     __ LoadHeapObject(ToRegister(instr->result()),
                       Handle<HeapObject>::cast(value));
   }
-}
-
-
-void LCodeGen::DoJSArrayLength(LJSArrayLength* instr) {
-  Register result = ToRegister(instr->result());
-  Register array = ToRegister(instr->value());
-  __ lw(result, FieldMemOperand(array, JSArray::kLengthOffset));
 }
 
 
@@ -4578,10 +4570,11 @@ void LCodeGen::DoNumberTagU(LNumberTagU* instr) {
 
 // Convert unsigned integer with specified number of leading zeroes in binary
 // representation to IEEE 754 double.
-// Integer to convert is passed in register hiword.
+// Integer to convert is passed in register src.
 // Resulting double is returned in registers hiword:loword.
 // This functions does not work correctly for 0.
 static void GenerateUInt2Double(MacroAssembler* masm,
+                                Register src,
                                 Register hiword,
                                 Register loword,
                                 Register scratch,
@@ -4595,12 +4588,12 @@ static void GenerateUInt2Double(MacroAssembler* masm,
       kBitsPerInt - mantissa_shift_for_hi_word;
   masm->li(scratch, Operand(biased_exponent << HeapNumber::kExponentShift));
   if (mantissa_shift_for_hi_word > 0) {
-    masm->sll(loword, hiword, mantissa_shift_for_lo_word);
-    masm->srl(hiword, hiword, mantissa_shift_for_hi_word);
+    masm->sll(loword, src, mantissa_shift_for_lo_word);
+    masm->srl(hiword, src, mantissa_shift_for_hi_word);
     masm->Or(hiword, scratch, hiword);
   } else {
     masm->mov(loword, zero_reg);
-    masm->sll(hiword, hiword, mantissa_shift_for_hi_word);
+    masm->sll(hiword, src, mantissa_shift_for_hi_word);
     masm->Or(hiword, scratch, hiword);
   }
 
@@ -4651,17 +4644,17 @@ void LCodeGen::DoDeferredNumberTagI(LInstruction* instr,
       __ mtc1(src, dbl_scratch);
       __ Cvt_d_uw(dbl_scratch, dbl_scratch, f22);
     } else {
-      Label no_leading_zero, done;
+      Label no_leading_zero, convert_done;
       __ And(at, src, Operand(0x80000000));
       __ Branch(&no_leading_zero, ne, at, Operand(zero_reg));
 
       // Integer has one leading zeros.
-      GenerateUInt2Double(masm(), sfpd_hi, sfpd_lo, t0, 1);
-      __ Branch(&done);
+      GenerateUInt2Double(masm(), src, sfpd_hi, sfpd_lo, t0, 1);
+      __ Branch(&convert_done);
 
       __ bind(&no_leading_zero);
-      GenerateUInt2Double(masm(), sfpd_hi, sfpd_lo, t0, 0);
-      __ Branch(&done);
+      GenerateUInt2Double(masm(), src, sfpd_hi, sfpd_lo, t0, 0);
+      __ bind(&convert_done);
     }
   }
 
@@ -5213,7 +5206,6 @@ void LCodeGen::DoClampTToUint8(LClampTToUint8* instr) {
 
 
 void LCodeGen::DoCheckPrototypeMaps(LCheckPrototypeMaps* instr) {
-  ASSERT(instr->temp()->Equals(instr->result()));
   Register prototype_reg = ToRegister(instr->temp());
   Register map_reg = ToRegister(instr->temp2());
 
@@ -5226,8 +5218,6 @@ void LCodeGen::DoCheckPrototypeMaps(LCheckPrototypeMaps* instr) {
     for (int i = 0; i < maps->length(); i++) {
       prototype_maps_.Add(maps->at(i), info()->zone());
     }
-    __ LoadHeapObject(prototype_reg,
-                      prototypes->at(prototypes->length() - 1));
   } else {
     for (int i = 0; i < prototypes->length(); i++) {
       __ LoadHeapObject(prototype_reg, prototypes->at(i));
@@ -5411,7 +5401,6 @@ void LCodeGen::DoArrayLiteral(LArrayLiteral* instr) {
   // Boilerplate already exists, constant elements are never accessed.
   // Pass an empty fixed array.
   __ li(a1, Operand(isolate()->factory()->empty_fixed_array()));
-  __ Push(a3, a2, a1);
 
   // Pick the right runtime function or stub to call.
   int length = instr->hydrogen()->length();
@@ -5422,8 +5411,10 @@ void LCodeGen::DoArrayLiteral(LArrayLiteral* instr) {
     FastCloneShallowArrayStub stub(mode, DONT_TRACK_ALLOCATION_SITE, length);
     CallCode(stub.GetCode(isolate()), RelocInfo::CODE_TARGET, instr);
   } else if (instr->hydrogen()->depth() > 1) {
+    __ Push(a3, a2, a1);
     CallRuntime(Runtime::kCreateArrayLiteral, 3, instr);
   } else if (length > FastCloneShallowArrayStub::kMaximumClonedLength) {
+    __ Push(a3, a2, a1);
     CallRuntime(Runtime::kCreateArrayLiteralShallow, 3, instr);
   } else {
     FastCloneShallowArrayStub::Mode mode =

@@ -520,14 +520,15 @@ static Handle<SharedFunctionInfo> MakeFunctionInfo(CompilationInfo* info) {
 
   // Only allow non-global compiles for eval.
   ASSERT(info->is_eval() || info->is_global());
-  ParsingFlags flags = kNoParsingFlags;
-  if ((info->pre_parse_data() != NULL ||
-       String::cast(script->source())->length() > FLAG_min_preparse_length) &&
-      !DebuggerWantsEagerCompilation(info)) {
-    flags = kAllowLazy;
-  }
-  if (!ParserApi::Parse(info, flags)) {
-    return Handle<SharedFunctionInfo>::null();
+  {
+    Parser parser(info);
+    if ((info->pre_parse_data() != NULL ||
+         String::cast(script->source())->length() > FLAG_min_preparse_length) &&
+        !DebuggerWantsEagerCompilation(info))
+      parser.set_allow_lazy(true);
+    if (!parser.Parse()) {
+      return Handle<SharedFunctionInfo>::null();
+    }
   }
 
   // Measure how long it takes to do the compilation; only take the
@@ -864,7 +865,7 @@ bool Compiler::CompileLazy(CompilationInfo* info) {
   if (InstallCodeFromOptimizedCodeMap(info)) return true;
 
   // Generate the AST for the lazily compiled function.
-  if (ParserApi::Parse(info, kNoParsingFlags)) {
+  if (Parser::Parse(info)) {
     // Measure how long it takes to do the lazy compilation; only take the
     // rest of the function into account to avoid overlap with the lazy
     // parsing statistics.
@@ -932,7 +933,7 @@ void Compiler::RecompileParallel(Handle<JSFunction> closure) {
       return;
     }
 
-    if (ParserApi::Parse(*info, kNoParsingFlags)) {
+    if (Parser::Parse(*info)) {
       LanguageMode language_mode = info->function()->language_mode();
       info->SetLanguageMode(language_mode);
       shared->set_language_mode(language_mode);
@@ -1121,6 +1122,7 @@ void Compiler::SetFunctionInfo(Handle<SharedFunctionInfo> function_info,
   function_info->set_dont_optimize(lit->flags()->Contains(kDontOptimize));
   function_info->set_dont_inline(lit->flags()->Contains(kDontInline));
   function_info->set_dont_cache(lit->flags()->Contains(kDontCache));
+  function_info->set_is_generator(lit->is_generator());
 }
 
 
@@ -1134,7 +1136,7 @@ void Compiler::RecordFunctionCompilation(Logger::LogEventsAndTags tag,
   // script name and line number. Check explicitly whether logging is
   // enabled as finding the line number is not free.
   if (info->isolate()->logger()->is_logging_code_events() ||
-      CpuProfiler::is_profiling(info->isolate())) {
+      info->isolate()->cpu_profiler()->is_profiling()) {
     Handle<Script> script = info->script();
     Handle<Code> code = info->code();
     if (*code == info->isolate()->builtins()->builtin(Builtins::kLazyCompile))

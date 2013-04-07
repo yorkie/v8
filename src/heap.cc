@@ -1858,7 +1858,7 @@ class ScavengingVisitor : public StaticVisitorBase {
       HEAP_PROFILE(heap, ObjectMoveEvent(source->address(), target->address()));
       Isolate* isolate = heap->isolate();
       if (isolate->logger()->is_logging_code_events() ||
-          CpuProfiler::is_profiling(isolate)) {
+          isolate->cpu_profiler()->is_profiling()) {
         if (target->IsSharedFunctionInfo()) {
           PROFILE(isolate, SharedFunctionInfoMoveEvent(
               source->address(), target->address()));
@@ -2114,7 +2114,7 @@ static void InitializeScavengingVisitorsTables() {
 void Heap::SelectScavengingVisitorsTable() {
   bool logging_and_profiling =
       isolate()->logger()->is_logging() ||
-      CpuProfiler::is_profiling(isolate()) ||
+      isolate()->cpu_profiler()->is_profiling() ||
       (isolate()->heap_profiler() != NULL &&
        isolate()->heap_profiler()->is_profiling());
 
@@ -2835,13 +2835,6 @@ bool Heap::CreateInitialObjects() {
     if (!maybe_obj->ToObject(&obj)) return false;
   }
   hidden_string_ = String::cast(obj);
-
-  // Allocate the foreign for __proto__.
-  { MaybeObject* maybe_obj =
-        AllocateForeign((Address) &Accessors::ObjectPrototype);
-    if (!maybe_obj->ToObject(&obj)) return false;
-  }
-  set_prototype_accessors(Foreign::cast(obj));
 
   // Allocate the code_stubs dictionary. The initial size is set to avoid
   // expanding the dictionary during bootstrapping.
@@ -3884,7 +3877,7 @@ MaybeObject* Heap::CopyCode(Code* code, Vector<byte> reloc_info) {
   Address new_addr = reinterpret_cast<HeapObject*>(result)->address();
 
   // Copy header and instructions.
-  CopyBytes(new_addr, old_addr, static_cast<int>(relocation_offset));
+  CopyBytes(new_addr, old_addr, relocation_offset);
 
   Code* new_code = Code::cast(result);
   new_code->set_relocation_info(ByteArray::cast(reloc_info_array));
@@ -3892,7 +3885,7 @@ MaybeObject* Heap::CopyCode(Code* code, Vector<byte> reloc_info) {
   // Copy patched rinfo.
   CopyBytes(new_code->relocation_start(),
             reloc_info.start(),
-            reloc_info.length());
+            static_cast<size_t>(reloc_info.length()));
 
   // Relocate the copy.
   ASSERT(!isolate_->code_range()->exists() ||

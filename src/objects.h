@@ -2034,9 +2034,9 @@ class JSObject: public JSReceiver {
   inline bool HasIndexedInterceptor();
 
   // Support functions for v8 api (needed for correct interceptor behavior).
-  bool HasRealNamedProperty(Name* key);
-  bool HasRealElementProperty(uint32_t index);
-  bool HasRealNamedCallbackProperty(Name* key);
+  bool HasRealNamedProperty(Isolate* isolate, Name* key);
+  bool HasRealElementProperty(Isolate* isolate, uint32_t index);
+  bool HasRealNamedCallbackProperty(Isolate* isolate, Name* key);
 
   // Get the header size for a JSObject.  Used to compute the index of
   // internal fields as well as the number of internal fields.
@@ -2218,6 +2218,8 @@ class JSObject: public JSReceiver {
   static Handle<Object> PreventExtensions(Handle<JSObject> object);
   MUST_USE_RESULT MaybeObject* PreventExtensions();
 
+  // Copy object
+  MUST_USE_RESULT MaybeObject* DeepCopy(Isolate* isolate);
 
   // Dispatched behavior.
   void JSObjectShortPrint(StringStream* accumulator);
@@ -4352,6 +4354,11 @@ class Code: public HeapObject {
     NONEXISTENT
   };
 
+  enum StubHolder {
+    OWN_STUB,
+    PROTOTYPE_STUB
+  };
+
   enum {
     NUMBER_OF_KINDS = LAST_IC_KIND + 1
   };
@@ -4547,6 +4554,8 @@ class Code: public HeapObject {
   class ExtraICStateKeyedAccessStoreMode:
       public BitField<KeyedAccessStoreMode, 1, 4> {};  // NOLINT
 
+  class ExtraICStateStubHolder: public BitField<StubHolder, 0, 1> {};
+
   static inline StrictModeFlag GetStrictMode(ExtraICState extra_ic_state) {
     return ExtraICStateStrictMode::decode(extra_ic_state);
   }
@@ -4561,6 +4570,10 @@ class Code: public HeapObject {
       StrictModeFlag strict_mode) {
     return ExtraICStateKeyedAccessStoreMode::encode(store_mode) |
         ExtraICStateStrictMode::encode(strict_mode);
+  }
+
+  static inline ExtraICState ComputeExtraICState(StubHolder stub_holder) {
+    return ExtraICStateStubHolder::encode(stub_holder);
   }
 
   // Flags operations.
@@ -5948,6 +5961,9 @@ class SharedFunctionInfo: public HeapObject {
   // Indicates that code for this function cannot be cached.
   DECL_BOOLEAN_ACCESSORS(dont_cache)
 
+  // Indicates that this function is a generator.
+  DECL_BOOLEAN_ACCESSORS(is_generator)
+
   // Indicates whether or not the code in the shared function support
   // deoptimization.
   inline bool has_deoptimization_support();
@@ -6174,6 +6190,7 @@ class SharedFunctionInfo: public HeapObject {
     kDontOptimize,
     kDontInline,
     kDontCache,
+    kIsGenerator,
     kCompilerHintsCount  // Pseudo entry
   };
 

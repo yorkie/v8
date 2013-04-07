@@ -39,6 +39,18 @@ namespace v8 {
 namespace internal {
 
 
+void FastCloneShallowArrayStub::InitializeInterfaceDescriptor(
+    Isolate* isolate,
+    CodeStubInterfaceDescriptor* descriptor) {
+  static Register registers[] = { a3, a2, a1 };
+  descriptor->register_param_count_ = 3;
+  descriptor->register_params_ = registers;
+  descriptor->stack_parameter_count_ = NULL;
+  descriptor->deoptimization_handler_ =
+      Runtime::FunctionForId(Runtime::kCreateArrayLiteralShallow)->entry;
+}
+
+
 void FastCloneShallowObjectStub::InitializeInterfaceDescriptor(
     Isolate* isolate,
     CodeStubInterfaceDescriptor* descriptor) {
@@ -96,7 +108,7 @@ static void InitializeArrayConstructorDescriptor(Isolate* isolate,
   // stack param count needs (constructor pointer, and single argument)
   descriptor->stack_parameter_count_ = &a0;
   descriptor->register_params_ = registers;
-  descriptor->extra_expression_stack_count_ = 1;
+  descriptor->function_mode_ = JS_FUNCTION_STUB_MODE;
   descriptor->deoptimization_handler_ =
       FUNCTION_ADDR(ArrayConstructor_StubFailure);
 }
@@ -402,147 +414,6 @@ void FastNewBlockContextStub::Generate(MacroAssembler* masm) {
 }
 
 
-static void GenerateFastCloneShallowArrayCommon(
-    MacroAssembler* masm,
-    int length,
-    FastCloneShallowArrayStub::Mode mode,
-    AllocationSiteMode allocation_site_mode,
-    Label* fail) {
-  // Registers on entry:
-  // a3: boilerplate literal array.
-  ASSERT(mode != FastCloneShallowArrayStub::CLONE_ANY_ELEMENTS);
-
-  // All sizes here are multiples of kPointerSize.
-  int elements_size = 0;
-  if (length > 0) {
-    elements_size = mode == FastCloneShallowArrayStub::CLONE_DOUBLE_ELEMENTS
-        ? FixedDoubleArray::SizeFor(length)
-        : FixedArray::SizeFor(length);
-  }
-
-  int size = JSArray::kSize;
-  int allocation_info_start = size;
-  if (allocation_site_mode == TRACK_ALLOCATION_SITE) {
-    size += AllocationSiteInfo::kSize;
-  }
-  size += elements_size;
-
-  // Allocate both the JS array and the elements array in one big
-  // allocation. This avoids multiple limit checks.
-  __ Allocate(size, v0, a1, a2, fail, TAG_OBJECT);
-
-  if (allocation_site_mode == TRACK_ALLOCATION_SITE) {
-    __ li(a2, Operand(Handle<Map>(masm->isolate()->heap()->
-                                   allocation_site_info_map())));
-    __ sw(a2, FieldMemOperand(v0, allocation_info_start));
-    __ sw(a3, FieldMemOperand(v0, allocation_info_start + kPointerSize));
-  }
-
-  // Copy the JS array part.
-  for (int i = 0; i < JSArray::kSize; i += kPointerSize) {
-    if ((i != JSArray::kElementsOffset) || (length == 0)) {
-      __ lw(a1, FieldMemOperand(a3, i));
-      __ sw(a1, FieldMemOperand(v0, i));
-    }
-  }
-
-  if (length > 0) {
-    // Get hold of the elements array of the boilerplate and setup the
-    // elements pointer in the resulting object.
-    __ lw(a3, FieldMemOperand(a3, JSArray::kElementsOffset));
-    if (allocation_site_mode == TRACK_ALLOCATION_SITE) {
-      __ Addu(a2, v0, Operand(JSArray::kSize + AllocationSiteInfo::kSize));
-    } else {
-      __ Addu(a2, v0, Operand(JSArray::kSize));
-    }
-    __ sw(a2, FieldMemOperand(v0, JSArray::kElementsOffset));
-
-    // Copy the elements array.
-    ASSERT((elements_size % kPointerSize) == 0);
-    __ CopyFields(a2, a3, a1.bit(), elements_size / kPointerSize);
-  }
-}
-
-void FastCloneShallowArrayStub::Generate(MacroAssembler* masm) {
-  // Stack layout on entry:
-  //
-  // [sp]: constant elements.
-  // [sp + kPointerSize]: literal index.
-  // [sp + (2 * kPointerSize)]: literals array.
-
-  // Load boilerplate object into r3 and check if we need to create a
-  // boilerplate.
-  Label slow_case;
-  __ lw(a3, MemOperand(sp, 2 * kPointerSize));
-  __ lw(a0, MemOperand(sp, 1 * kPointerSize));
-  __ Addu(a3, a3, Operand(FixedArray::kHeaderSize - kHeapObjectTag));
-  __ sll(t0, a0, kPointerSizeLog2 - kSmiTagSize);
-  __ Addu(t0, a3, t0);
-  __ lw(a3, MemOperand(t0));
-  __ LoadRoot(t1, Heap::kUndefinedValueRootIndex);
-  __ Branch(&slow_case, eq, a3, Operand(t1));
-
-  FastCloneShallowArrayStub::Mode mode = mode_;
-  if (mode == CLONE_ANY_ELEMENTS) {
-    Label double_elements, check_fast_elements;
-    __ lw(v0, FieldMemOperand(a3, JSArray::kElementsOffset));
-    __ lw(v0, FieldMemOperand(v0, HeapObject::kMapOffset));
-    __ LoadRoot(t1, Heap::kFixedCOWArrayMapRootIndex);
-    __ Branch(&check_fast_elements, ne, v0, Operand(t1));
-    GenerateFastCloneShallowArrayCommon(masm, 0, COPY_ON_WRITE_ELEMENTS,
-                                        allocation_site_mode_,
-                                        &slow_case);
-    // Return and remove the on-stack parameters.
-    __ DropAndRet(3);
-
-    __ bind(&check_fast_elements);
-    __ LoadRoot(t1, Heap::kFixedArrayMapRootIndex);
-    __ Branch(&double_elements, ne, v0, Operand(t1));
-    GenerateFastCloneShallowArrayCommon(masm, length_, CLONE_ELEMENTS,
-                                        allocation_site_mode_,
-                                        &slow_case);
-    // Return and remove the on-stack parameters.
-    __ DropAndRet(3);
-
-    __ bind(&double_elements);
-    mode = CLONE_DOUBLE_ELEMENTS;
-    // Fall through to generate the code to handle double elements.
-  }
-
-  if (FLAG_debug_code) {
-    const char* message;
-    Heap::RootListIndex expected_map_index;
-    if (mode == CLONE_ELEMENTS) {
-      message = "Expected (writable) fixed array";
-      expected_map_index = Heap::kFixedArrayMapRootIndex;
-    } else if (mode == CLONE_DOUBLE_ELEMENTS) {
-      message = "Expected (writable) fixed double array";
-      expected_map_index = Heap::kFixedDoubleArrayMapRootIndex;
-    } else {
-      ASSERT(mode == COPY_ON_WRITE_ELEMENTS);
-      message = "Expected copy-on-write fixed array";
-      expected_map_index = Heap::kFixedCOWArrayMapRootIndex;
-    }
-    __ push(a3);
-    __ lw(a3, FieldMemOperand(a3, JSArray::kElementsOffset));
-    __ lw(a3, FieldMemOperand(a3, HeapObject::kMapOffset));
-    __ LoadRoot(at, expected_map_index);
-    __ Assert(eq, message, a3, Operand(at));
-    __ pop(a3);
-  }
-
-  GenerateFastCloneShallowArrayCommon(masm, length_, mode,
-                                      allocation_site_mode_,
-                                      &slow_case);
-
-  // Return and remove the on-stack parameters.
-  __ DropAndRet(3);
-
-  __ bind(&slow_case);
-  __ TailCallRuntime(Runtime::kCreateArrayLiteralShallow, 3, 1);
-}
-
-
 // Takes a Smi and converts to an IEEE 64 bit floating point value in two
 // registers.  The format is 1 sign bit, 11 exponent bits (biased 1023) and
 // 52 fraction bits (20 in the first word, 32 in the second).  Zeros is a
@@ -684,8 +555,6 @@ void FloatingPointHelper::LoadNumber(MacroAssembler* masm,
                                      Register scratch1,
                                      Register scratch2,
                                      Label* not_number) {
-  ASSERT(!object.is(dst1) && !object.is(dst2));
-
   __ AssertRootValue(heap_number_map,
                      Heap::kHeapNumberMapRootIndex,
                      "HeapNumberMap register clobbered.");
@@ -842,7 +711,7 @@ void FloatingPointHelper::ConvertIntToDouble(MacroAssembler* masm,
     // Get the number of bits to set in the lower part of the mantissa.
     __ Subu(scratch2, dst_mantissa,
         Operand(HeapNumber::kMantissaBitsInTopWord));
-    __ Branch(&fewer_than_20_useful_bits, lt, scratch2, Operand(zero_reg));
+    __ Branch(&fewer_than_20_useful_bits, le, scratch2, Operand(zero_reg));
     // Set the higher 20 bits of the mantissa.
     __ srlv(at, int_scratch, scratch2);
     __ or_(dst_exponent, dst_exponent, at);
@@ -880,10 +749,6 @@ void FloatingPointHelper::LoadNumberAsInt32Double(MacroAssembler* masm,
   ASSERT(!heap_number_map.is(object) &&
          !heap_number_map.is(scratch1) &&
          !heap_number_map.is(scratch2));
-  // ARM uses pop/push and Ldlr to save dst_* and probably object registers in
-  // softfloat path. On MIPS there is no ldlr, 1st lw instruction may overwrite
-  // object register making the 2nd lw invalid.
-  ASSERT(!object.is(dst_mantissa) && !object.is(dst_exponent));
 
   Label done, obj_is_not_smi;
 
@@ -920,24 +785,60 @@ void FloatingPointHelper::LoadNumberAsInt32Double(MacroAssembler* masm,
     if (destination == kCoreRegisters) {
       __ Move(dst_mantissa, dst_exponent, double_dst);
     }
+
   } else {
+    ASSERT(!scratch1.is(object) && !scratch2.is(object));
     // Load the double value in the destination registers.
-    __ lw(dst_exponent, FieldMemOperand(object, HeapNumber::kExponentOffset));
-    __ lw(dst_mantissa, FieldMemOperand(object, HeapNumber::kMantissaOffset));
+    bool save_registers = object.is(dst_mantissa) || object.is(dst_exponent);
+    if (save_registers) {
+      // Save both output registers, because the other one probably holds
+      // an important value too.
+      __ Push(dst_exponent, dst_mantissa);
+    }
+    if (object.is(dst_mantissa)) {
+      __ lw(dst_exponent, FieldMemOperand(object, HeapNumber::kExponentOffset));
+      __ lw(dst_mantissa, FieldMemOperand(object, HeapNumber::kMantissaOffset));
+    } else {
+      __ lw(dst_mantissa, FieldMemOperand(object, HeapNumber::kMantissaOffset));
+      __ lw(dst_exponent, FieldMemOperand(object, HeapNumber::kExponentOffset));
+    }
 
     // Check for 0 and -0.
+    Label zero;
     __ And(scratch1, dst_exponent, Operand(~HeapNumber::kSignMask));
     __ Or(scratch1, scratch1, Operand(dst_mantissa));
-    __ Branch(&done, eq, scratch1, Operand(zero_reg));
+    __ Branch(&zero, eq, scratch1, Operand(zero_reg));
 
     // Check that the value can be exactly represented by a 32-bit integer.
     // Jump to not_int32 if that's not the case.
+    Label restore_input_and_miss;
     DoubleIs32BitInteger(masm, dst_exponent, dst_mantissa, scratch1, scratch2,
-                         not_int32);
+                         &restore_input_and_miss);
 
     // dst_* were trashed. Reload the double value.
-    __ lw(dst_exponent, FieldMemOperand(object, HeapNumber::kExponentOffset));
-    __ lw(dst_mantissa, FieldMemOperand(object, HeapNumber::kMantissaOffset));
+    if (save_registers) {
+      __ Pop(dst_exponent, dst_mantissa);
+    }
+    if (object.is(dst_mantissa)) {
+      __ lw(dst_exponent, FieldMemOperand(object, HeapNumber::kExponentOffset));
+      __ lw(dst_mantissa, FieldMemOperand(object, HeapNumber::kMantissaOffset));
+    } else {
+      __ lw(dst_mantissa, FieldMemOperand(object, HeapNumber::kMantissaOffset));
+      __ lw(dst_exponent, FieldMemOperand(object, HeapNumber::kExponentOffset));
+    }
+
+    __ Branch(&done);
+
+    __ bind(&restore_input_and_miss);
+    if (save_registers) {
+      __ Pop(dst_exponent, dst_mantissa);
+    }
+    __ Branch(not_int32);
+
+    __ bind(&zero);
+    if (save_registers) {
+      __ Drop(2);
+    }
   }
 
   __ bind(&done);
@@ -2688,20 +2589,16 @@ void BinaryOpStub_GenerateFPOperation(MacroAssembler* masm,
               masm, destination, right, f14, a2, a3, heap_number_map,
               scratch1, scratch2, fail);
         }
-        // Use scratch3 as left in LoadNumber functions to avoid overwriting of
-        // left (a0) register.
-        __ mov(scratch3, left);
-
         // Load left operand to f12 or a0/a1. This keeps a0/a1 intact if it
         // jumps to |miss|.
         if (left_type == BinaryOpIC::INT32) {
           FloatingPointHelper::LoadNumberAsInt32Double(
-              masm, scratch3, destination, f12, f16, a0, a1, heap_number_map,
+              masm, left, destination, f12, f16, a0, a1, heap_number_map,
               scratch1, scratch2, f2, miss);
         } else {
           Label* fail = (left_type == BinaryOpIC::NUMBER) ? miss : not_numbers;
           FloatingPointHelper::LoadNumber(
-              masm, destination, scratch3, f12, a0, a1, heap_number_map,
+              masm, destination, left, f12, a0, a1, heap_number_map,
               scratch1, scratch2, fail);
         }
       }
@@ -3924,6 +3821,7 @@ void CodeStub::GenerateStubsAheadOfTime(Isolate* isolate) {
   CEntryStub::GenerateAheadOfTime(isolate);
   WriteInt32ToHeapNumberStub::GenerateFixedRegStubsAheadOfTime(isolate);
   StoreBufferOverflowStub::GenerateFixedRegStubsAheadOfTime(isolate);
+  StubFailureTrampolineStub::GenerateAheadOfTime(isolate);
   RecordWriteStub::GenerateFixedRegStubsAheadOfTime(isolate);
 }
 
@@ -3940,11 +3838,13 @@ void CodeStub::GenerateFPStubs(Isolate* isolate) {
   Code* save_doubles_code;
   if (!save_doubles.FindCodeInCache(&save_doubles_code, isolate)) {
     save_doubles_code = *save_doubles.GetCode(isolate);
-    save_doubles_code->set_is_pregenerated(true);
-
-    Code* store_buffer_overflow_code = *stub.GetCode(isolate);
-    store_buffer_overflow_code->set_is_pregenerated(true);
   }
+  Code* store_buffer_overflow_code;
+  if (!stub.FindCodeInCache(&store_buffer_overflow_code, isolate)) {
+      store_buffer_overflow_code = *stub.GetCode(isolate);
+  }
+  save_doubles_code->set_is_pregenerated(true);
+  store_buffer_overflow_code->set_is_pregenerated(true);
   isolate->set_fp_stubs_generated(true);
 }
 
@@ -7785,11 +7685,6 @@ bool RecordWriteStub::IsPregenerated() {
 }
 
 
-bool StoreBufferOverflowStub::IsPregenerated() {
-  return save_doubles_ == kDontSaveFPRegs || ISOLATE->fp_stubs_generated();
-}
-
-
 void StoreBufferOverflowStub::GenerateFixedRegStubsAheadOfTime(
     Isolate* isolate) {
   StoreBufferOverflowStub stub1(kDontSaveFPRegs);
@@ -8080,13 +7975,14 @@ void StoreArrayLiteralElementStub::Generate(MacroAssembler* masm) {
 
 
 void StubFailureTrampolineStub::Generate(MacroAssembler* masm) {
-  ASSERT(!Serializer::enabled());
-  bool save_fp_regs = CpuFeatures::IsSupported(FPU);
-  CEntryStub ces(1, save_fp_regs ? kSaveFPRegs : kDontSaveFPRegs);
+  CEntryStub ces(1, fp_registers_ ? kSaveFPRegs : kDontSaveFPRegs);
   __ Call(ces.GetCode(masm->isolate()), RelocInfo::CODE_TARGET);
   int parameter_count_offset =
       StubFailureTrampolineFrame::kCallerStackParameterCountFrameOffset;
   __ lw(a1, MemOperand(fp, parameter_count_offset));
+  if (function_mode_ == JS_FUNCTION_STUB_MODE) {
+    __ Addu(a1, a1, Operand(1));
+  }
   masm->LeaveFrame(StackFrame::STUB_FAILURE_TRAMPOLINE);
   __ sll(a1, a1, kPointerSizeLog2);
   __ Addu(sp, sp, a1);
